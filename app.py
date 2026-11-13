@@ -8,6 +8,8 @@ from flask import (Flask, g, request, session, redirect, render_template as _rt,
                    flash, abort)
 from jinja2 import DictLoader
 from werkzeug.security import generate_password_hash, check_password_hash
+from itsdangerous import URLSafeTimedSerializer, BadData
+from markupsafe import escape
 
 # ===================== הגדרות =====================
 ADMIN_CODE = os.environ.get("ADMIN_CODE", "")      # קוד כניסה לדף /admin (חובה להגדיר, אחרת הדף נעול)
@@ -16,7 +18,8 @@ SUPPORT_EMAIL = os.environ.get("SUPPORT_EMAIL", "")
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 EMAIL_FROM = os.environ.get("EMAIL_FROM", "TeenJobs <onboarding@resend.dev>")
-DEV_MODE = not RESEND_API_KEY                      # בלי מפתח – הקוד מודפס ללוגים (לבדיקות בלבד)
+BREVO_API_KEY = os.environ.get("BREVO_API_KEY", "")  # חלופה חינמית ל-Resend שלא דורשת דומיין (EMAIL_FROM = כתובת שאומתה ב-Brevo)
+DEV_MODE = not (RESEND_API_KEY or BREVO_API_KEY)                     # בלי מפתח – הקוד מודפס ללוגים (לבדיקות בלבד)
 DATABASE_URL = os.environ.get("DATABASE_URL", "")  # PostgreSQL (Neon). ריק = SQLite מקומי לפיתוח
 PG = DATABASE_URL.startswith("postgres")
 DB = os.environ.get("SQLITE_PATH", "teenjob.db")
@@ -170,12 +173,36 @@ def need(mode=None):
 def inject():
     me = q("SELECT * FROM users WHERE id=?", (session.get("uid"),), True) if session.get("uid") else None
     favs = {r["job_id"] for r in q("SELECT job_id FROM favs WHERE user_id=?", (session["uid"],))} if session.get("uid") else set()
-    return dict(me=me, favs=favs, TICON=TYPE_ICON, SUPPORT=SUPPORT_EMAIL, mode=session.get("mode"), BRAND=BRAND, lang=session.get("lang", "he"), TMA=TYPE_MIN_AGE, CITIES=CITIES, TYPES=TYPES, DURS=DURS,
+    return dict(me=me, favs=favs, TICON=TYPE_ICON, SUPPORT=SUPPORT_EMAIL, mode=session.get("mode"), BRAND=BRAND, GSV=GSV, CITY_URL=CITY_URL, TYPE_URL=TYPE_URL,lang=session.get("lang", "he"), TMA=TYPE_MIN_AGE, CITIES=CITIES, TYPES=TYPES, DURS=DURS,
                 STATUSES=STATUSES, CSS=CSS, wage_floor=wage_floor,
                 stars=lambda v: "★" * round(v or 0) + "☆" * (5 - round(v or 0)))
 
 # ===================== אבטחה, שפה וברקוד =====================
+# ---------- SEO: כותרת ותיאור לכל דף (מה שגוגל מציג בתוצאות החיפוש) ----------
+GSV = os.environ.get("GOOGLE_SITE_VERIFICATION", "")   # קוד האימות מ-Google Search Console
+SEO_DESC = "לוח משרות לבני נוער בגילאי 14–21: בייביסיטר, דוג ווקר, מסעדות, חנויות ועוד. מעסיקים מאומתים, משרות שנבדקות והגשת מועמדות בקליק."
+SEO = {"home": ("עבודות לבני נוער בישראל", SEO_DESC),
+       "jobs": ("חיפוש משרות לבני נוער", "כל המשרות הפתוחות לבני נוער: סינון לפי עיר, גיל, שכר ושעות. מגישים מועמדות אונליין בחינם."),
+       "employers": ("פרסום משרה לבני נוער – למעסיקים", "מחפשים עובדים צעירים? מפרסמים משרה בחינם, היא נבדקת לפי חוק עבודת הנוער, ומקבלים מועמדים בגילאי 14–21."),
+       "faq": ("שאלות נפוצות על עבודה לבני נוער", "מאיזה גיל מותר לעבוד, כמה שעות, מה השכר המינימלי לנוער ואיך מגישים מועמדות למשרה.")}
+LEGAL_T = {"terms": "תנאי שימוש", "privacy": "מדיניות פרטיות", "support": "תמיכה ויצירת קשר"}
+PRIVATE = {"/me", "/employer", "/choose", "/verify", "/account", "/admin", "/qr", "/login", "/register", "/forgot"}   # דפים שלא אמורים להופיע בגוגל
+# דפי נחיתה: כתובת נקייה לכל עיר ולכל תחום, למשל /jobs/city/תל-אביב-יפו
+CITY_SLUG = {c.replace(" ", "-"): c for c in CITIES if c != "אחר"}
+TYPE_SLUG = dict(zip(["בייביסיטר", "דוג-ווקר", "שיעורים-פרטיים", "הדרכה-וחוגים", "חנויות", "מסעדות-וקפה", "מטבח-ופיצה",
+                      "שליחויות", "משרד-ושירות-לקוחות", "גינה-ועבודות-בית"], TYPES))
+CITY_URL = {c: "/jobs/city/" + s for s, c in CITY_SLUG.items()}
+TYPE_URL = {t: "/jobs/type/" + s for s, t in TYPE_SLUG.items()}
+
 def render_template(name, **kw):
+    t, d = SEO.get(name, ("", SEO_DESC))
+    if name == "legal": t = LEGAL_T.get(kw.get("page"), "")
+    t = kw.get("title") or t
+    kw["title"] = f"{t} | {BRAND}" if t and name != "home" else f"{BRAND} – {SEO['home'][0]}"
+    kw.setdefault("desc", d)
+    p = request.path
+    kw.setdefault("noindex", name == "err" or p in PRIVATE or p.startswith(("/employer/", "/reset/")))
+    kw.setdefault("canon", site() + urllib.parse.quote(p))
     return _rt(("en/" if session.get("lang") == "en" else "") + name, **kw)
 
 def en(s):
@@ -224,6 +251,27 @@ def qr_page():
     if not u: return render_template("qr", svg="", url="", auto=True)   # הדפדפן ישלים את הכתובת האמיתית
     if not u.startswith(("http://", "https://")): u = "https://" + u
     return render_template("qr", svg=make_qr(u), url=u, auto=False)
+
+@app.route("/robots.txt")
+def robots():
+    txt = ("User-agent: *\nDisallow: /admin\nDisallow: /account\nDisallow: /verify\nDisallow: /reset/\nDisallow: /lang/\nDisallow: /qr\n"
+           "Disallow: /employer/\nDisallow: /employer$\nDisallow: /me$\n\nSitemap: " + site() + "/sitemap.xml\n")
+    return app.response_class(txt, mimetype="text/plain")
+
+@app.route("/sitemap.xml")
+def sitemap():
+    """מפת אתר לגוגל: דפים קבועים, דפי עיר ותחום שיש בהם משרות, וכל משרה פעילה."""
+    live = "FROM jobs WHERE active=1 AND approved=1"
+    urls = [("/", ""), ("/jobs", ""), ("/employers", ""), ("/faq", ""), ("/terms", ""), ("/privacy", ""), ("/support", "")]
+    urls += [(CITY_URL[r["city"]], "") for r in q("SELECT DISTINCT city " + live) if r["city"] in CITY_URL]
+    urls += [(TYPE_URL[r["jtype"]], "") for r in q("SELECT DISTINCT jtype " + live) if r["jtype"] in TYPE_URL]
+    urls += [("/job/%d" % r["id"], str(r["created"])[:10]) for r in q("SELECT id, created " + live + " ORDER BY id DESC LIMIT 5000")]
+    base = site()
+    xml = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    for p, d in urls:
+        xml.append("<url><loc>" + base + urllib.parse.quote(p) + "</loc>" + ("<lastmod>" + d + "</lastmod>" if d else "") + "</url>")
+    xml.append("</urlset>")
+    return app.response_class("\n".join(xml), mimetype="application/xml")
 
 @app.route("/health")
 def health():
@@ -351,15 +399,16 @@ def _e500(e): return render_template("err", code=500, msg="משהו השתבש �
 @app.route("/")
 def home():
     pop = q(JOB_SQL + "ORDER BY (SELECT COUNT(*) FROM apps WHERE job_id=j.id) DESC, j.id DESC LIMIT 6")
-    st = dict(jobs=q("SELECT COUNT(*) c FROM jobs WHERE active=1", one=True)["c"],
+    st = dict(jobs=q("SELECT COUNT(*) c FROM jobs WHERE active=1 AND approved=1", one=True)["c"],
               biz=q("SELECT COUNT(*) c FROM employers WHERE verified=1", one=True)["c"],
               teens=q("SELECT COUNT(*) c FROM users WHERE age IS NOT NULL", one=True)["c"])
     cats = {r["jtype"]: r["c"] for r in q("SELECT jtype, COUNT(*) c FROM jobs WHERE active=1 AND approved=1 GROUP BY jtype")}
-    return render_template("home", pop=pop, st=st, cats=cats)
+    ld = [{"@context": "https://schema.org", "@type": "WebSite", "name": BRAND, "url": site() + "/", "inLanguage": "he"},
+          {"@context": "https://schema.org", "@type": "Organization", "name": BRAND, "url": site() + "/"}]
+    return render_template("home", pop=pop, st=st, cats=cats, ld=ld)
 
-@app.route("/jobs")
-def jobs():
-    a = request.args; sql = JOB_SQL; p = []
+def search_jobs(a):
+    sql = JOB_SQL; p = []
     if a.get("q"):
         sql += "AND (j.title LIKE ? OR e.business LIKE ? OR j.description LIKE ?) "; p += [f"%{a['q']}%"] * 3
     if a.get("city"): sql += "AND j.city=? "; p.append(a["city"])
@@ -381,8 +430,48 @@ def jobs():
         order = "(CASE WHEN j.wage_period='month' THEN j.wage/NULLIF((j.end_h-j.start_h)*j.days_per_week*4.33e0,0) WHEN j.wage_period='job' THEN j.wage/NULLIF(j.end_h-j.start_h,0) ELSE j.wage END) DESC, j.id DESC"
     elif a.get("sort") in ("near", "rel") and u and u["city"]:
         order, op = "(CASE WHEN j.city=? THEN 0 ELSE 1 END), j.id DESC", [u["city"]]
-    res = q(sql + "ORDER BY " + order, p + op)
-    return render_template("jobs", res=res, a=a)
+    return q(sql + "ORDER BY " + order, p + op)
+
+@app.route("/jobs")
+def jobs():
+    a = request.args      # חיפוש עם סינון לא נכנס לגוגל (אינסוף צירופים של אותו תוכן); דפי העיר והתחום כן
+    return render_template("jobs", res=search_jobs(a), a=a, noindex=bool(a), canon=site() + "/jobs")
+
+def _landing(a, h1, intro):
+    res = search_jobs(a)      # דף נחיתה ריק לא נכנס לגוגל, כדי שלא ייחשב "תוכן דל"
+    return render_template("jobs", res=res, a=a, h1=h1, intro=intro, title=h1, noindex=not res,
+                           desc=f"{h1}: {len(res)} משרות פתוחות עכשיו. {intro}")
+
+@app.route("/jobs/city/<slug>")
+def jobs_city(slug):
+    city = CITY_SLUG.get(slug) or abort(404)
+    return _landing({"city": city}, f"עבודות לבני נוער ב{city}",
+                    f"משרות לגילאי 14–21 ב{city}: בייביסיטר, מסעדות, חנויות, שיעורים פרטיים ועוד. כל משרה נבדקת לפני פרסום.")
+
+@app.route("/jobs/type/<slug>")
+def jobs_type(slug):
+    jt = TYPE_SLUG.get(slug) or abort(404); name = slug.replace("-", " ")
+    return _landing({"jtype": jt}, f"משרות {name} לבני נוער",
+                    f"עבודות {name} לגילאי 14–21 בכל הארץ, עם שכר, שעות וגיל מינימלי לכל משרה. כל משרה נבדקת לפני פרסום.")
+
+def job_ld(j):
+    """סימון JobPosting ש-Google for Jobs קורא, כדי שהמשרה תופיע בתיבת המשרות של גוגל."""
+    if j["city"] not in CITY_URL: return None      # בלי עיר אמיתית הסימון לא תקין
+    url = f"{site()}/job/{j['id']}"
+    html = "<p>" + str(escape(j["description"] or "")).replace("\n", "<br>") + "</p>"
+    if j["requirements"]: html += "<p><b>דרישות:</b> " + str(escape(j["requirements"])).replace("\n", "<br>") + "</p>"
+    html += f"<p>גיל מינימלי: {j['min_age']}. שעות: {j['start_h']:02d}:00–{j['end_h']:02d}:00.</p>"
+    d = {"@context": "https://schema.org", "@type": "JobPosting", "title": j["title"], "description": html, "url": url,
+         "datePosted": str(j["created"])[:10], "employmentType": "TEMPORARY" if j["duration"] == "חד-פעמית" else "PART_TIME",
+         "hiringOrganization": {"@type": "Organization", "name": j["business"]},
+         "jobLocation": {"@type": "Place", "address": {"@type": "PostalAddress", "addressLocality": j["city"], "addressCountry": "IL"}},
+         "identifier": {"@type": "PropertyValue", "name": BRAND, "value": str(j["id"])}, "directApply": True}
+    unit = {"hour": "HOUR", "month": "MONTH"}.get(j["wage_period"] or "hour")
+    if unit: d["baseSalary"] = {"@type": "MonetaryAmount", "currency": "ILS",
+                                "value": {"@type": "QuantitativeValue", "value": j["wage"], "unitText": unit}}
+    crumbs = [("בית", site() + "/"), ("משרות", site() + "/jobs"), (j["city"], site() + urllib.parse.quote(CITY_URL[j["city"]])), (j["title"], url)]
+    return [d, {"@context": "https://schema.org", "@type": "BreadcrumbList", "itemListElement": [
+        {"@type": "ListItem", "position": i + 1, "name": n, "item": u} for i, (n, u) in enumerate(crumbs)]}]
 
 @app.route("/job/<int:jid>")
 def job(jid):
@@ -392,7 +481,11 @@ def job(jid):
     fav = uid and q("SELECT 1 FROM favs WHERE user_id=? AND job_id=?", (uid, jid), True)
     ap = uid and q("SELECT * FROM apps WHERE user_id=? AND job_id=?", (uid, jid), True)
     emp = q("SELECT * FROM employers WHERE user_id=?", (j["employer_id"],), True)
-    return render_template("job", j=j, rv=rv, fav=fav, ap=ap, emp=emp, celebrate=session.pop("celebrate", None))
+    more = q(JOB_SQL + "AND j.city=? AND j.id<>? ORDER BY j.id DESC LIMIT 3", (j["city"], jid))
+    where = f" ב{j['city']}" if j["city"] in CITY_URL else ""
+    desc = f"{j['title']}{where} אצל {j['business']}, מגיל {j['min_age']}. " + " ".join((j["description"] or "").split())[:110]
+    return render_template("job", j=j, rv=rv, fav=fav, ap=ap, emp=emp, more=more, celebrate=session.pop("celebrate", None),
+                           title=f"{j['title']}{where} – {j['business']}", desc=desc, ld=job_ld(j))
 
 # ===================== נתיבים: משתמשים =====================
 # ===================== התחברות עם קוד אימות במייל =====================
@@ -400,7 +493,38 @@ FAILS = {}
 def locked(k):
     n, t = FAILS.get(k, (0, 0)); return n >= 5 and time.time() - t < 600
 def failed(k):
-    n, t = FAILS.get(k, (0, 0)); FAILS[k] = (n + 1, t if n else time.time())
+    n, t = FAILS.get(k, (0, 0))
+    FAILS[k] = (1, time.time()) if time.time() - t > 600 else (n + 1, t)   # חלון של 10 דקות שמתאפס (קודם הנעילה עבדה רק פעם אחת)
+
+def site():
+    return (PUBLIC_URL or request.host_url).rstrip("/")
+
+def send_mail(to, subject, text):
+    """שולח אימייל דרך Brevo (אם הוגדר BREVO_API_KEY) או Resend. מחזיר True אם נשלח."""
+    if DEV_MODE:
+        print(f" [מצב פיתוח] אימייל אל {to}: {subject}\n{text}"); return False
+    if BREVO_API_KEY:
+        m = re.fullmatch(r"\s*(.*?)\s*<([^<>]+)>\s*", EMAIL_FROM)
+        sender = {"name": m.group(1) or BRAND, "email": m.group(2).strip()} if m else {"name": BRAND, "email": EMAIL_FROM.strip()}
+        url, hdr = "https://api.brevo.com/v3/smtp/email", {"api-key": BREVO_API_KEY}
+        payload = {"sender": sender, "to": [{"email": to}], "subject": subject, "textContent": text}
+    else:
+        url, hdr = "https://api.resend.com/emails", {"Authorization": "Bearer " + RESEND_API_KEY}
+        payload = {"from": EMAIL_FROM, "to": [to], "subject": subject, "text": text}
+    hdr.update({"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "teenjobs/1.0"})
+    try:
+        urllib.request.urlopen(urllib.request.Request(url, json.dumps(payload).encode(), hdr), timeout=15); return True
+    except Exception as err:
+        body = err.read().decode()[:300] if hasattr(err, "read") else ""
+        print("שליחת האימייל נכשלה:", err, body)
+        if "testing emails" in body or "verify a domain" in body:
+            print("⚠ Resend במצב בדיקה: עם onboarding@resend.dev אפשר לשלוח רק לכתובת של בעל החשבון. "
+                  "אמתו דומיין ב-resend.com/domains, או עברו ל-Brevo: הגדירו BREVO_API_KEY ו-EMAIL_FROM לכתובת שאימתתם שם.")
+        return False
+
+def mail_async(to, subject, text):
+    """התראה שנשלחת ברקע, כדי לא לעכב את הדף."""
+    if to: threading.Thread(target=send_mail, args=(to, subject, text), daemon=True).start()
 
 def send_code(uid):
     u = q("SELECT email FROM users WHERE id=?", (uid,), True)
@@ -408,21 +532,10 @@ def send_code(uid):
     ex("INSERT INTO otps(uid,h,exp,tries,sent) VALUES(?,?,?,0,?) ON CONFLICT(uid) DO UPDATE SET h=excluded.h, exp=excluded.exp, tries=0, sent=excluded.sent",
        (uid, generate_password_hash(code), time.time() + 600, time.time()))
     session["pending"] = uid
-    if not DEV_MODE:
-        payload = json.dumps({"from": EMAIL_FROM, "to": [u["email"]], "subject": tr(f"{BRAND} – קוד הכניסה שלך: {code}"),
-            "text": tr(f"שלום!\nקוד האימות שלך ל-{BRAND} הוא: {code}\nהקוד תקף ל-10 דקות. אם לא ביקשת להתחבר – התעלמו מההודעה.")}).encode()
-        req = urllib.request.Request("https://api.resend.com/emails", payload, {"Authorization": "Bearer " + RESEND_API_KEY,
-            "Content-Type": "application/json", "User-Agent": "teenjob/1.0"})
-        try:
-            urllib.request.urlopen(req, timeout=15); return
-        except Exception as err:
-            body = err.read().decode()[:300] if hasattr(err, "read") else ""
-            print("שליחת האימייל נכשלה:", err, body)
-            if "testing emails" in body or "verify a domain" in body:
-                print("⚠ Resend במצב בדיקה: עם onboarding@resend.dev אפשר לשלוח רק לכתובת של בעל החשבון. "
-                      "אמתו דומיין ב-resend.com/domains והגדירו ב-Render את EMAIL_FROM לכתובת מהדומיין הזה.")
-            flash("לא הצלחנו לשלוח את הקוד לאימייל. נסו שוב בעוד רגע או פנו לתמיכה.")
-    print(f" [מצב פיתוח] קוד האימות עבור {u['email']}: {code}")
+    if send_mail(u["email"], tr(f"{BRAND} – קוד הכניסה שלך: {code}"),
+                 tr(f"שלום!\nקוד האימות שלך ל-{BRAND} הוא: {code}\nהקוד תקף ל-10 דקות. אם לא ביקשת להתחבר – התעלמו מההודעה.")): return
+    if not DEV_MODE: flash("לא הצלחנו לשלוח את הקוד לאימייל. נסו שוב בעוד רגע או פנו לתמיכה.")
+    print(f" [קוד שלא נשלח במייל] קוד האימות עבור {u['email']}: {code}")
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
@@ -473,6 +586,60 @@ def resend():
     else: send_code(uid); flash("נשלח קוד חדש.")
     return redirect("/verify")
 
+# ---------- איפוס סיסמה (קישור חתום, תקף לשעה, חד-פעמי) ----------
+def _signer():
+    return URLSafeTimedSerializer(app.secret_key, salt="pw-reset")
+
+@app.route("/forgot", methods=["GET", "POST"])
+def forgot():
+    if request.method == "POST":
+        email = request.form.get("email", "").strip().lower(); k = "forgot" + str(request.remote_addr)
+        if locked(k): flash("יותר מדי ניסיונות. נסו שוב בעוד כמה דקות."); return redirect("/forgot")
+        failed(k)
+        u = q("SELECT id, pw FROM users WHERE email=?", (email,), True)
+        if u:      # החתימה כוללת קצה של הסיסמה הנוכחית, כך שהקישור מתבטל ברגע שהסיסמה מוחלפת
+            link = site() + "/reset/" + _signer().dumps([u["id"], u["pw"][-10:]])
+            mail_async(email, f"{BRAND} – איפוס סיסמה",
+                       f"שלום!\nכדי לבחור סיסמה חדשה ל-{BRAND} היכנסו לקישור:\n{link}\nהקישור תקף לשעה. אם לא ביקשתם לאפס סיסמה – התעלמו מההודעה.")
+        flash("אם האימייל רשום אצלנו, שלחנו אליו קישור לאיפוס הסיסמה.")   # אותה הודעה תמיד, כדי לא לחשוף מי רשום
+        return redirect("/login")
+    return render_template("forgot")
+
+@app.route("/reset/<tok>", methods=["GET", "POST"])
+def reset(tok):
+    try: uid, tail = _signer().loads(tok, max_age=3600)
+    except (BadData, ValueError, TypeError): uid = tail = None
+    u = uid and q("SELECT id, pw FROM users WHERE id=?", (uid,), True)
+    if not u or u["pw"][-10:] != tail:
+        flash("הקישור אינו תקין או שפג תוקפו. בקשו קישור חדש."); return redirect("/forgot")
+    if request.method == "POST":
+        pw = request.form.get("pw", "")
+        if len(pw) < 8: flash("הסיסמה חייבת להכיל לפחות 8 תווים.")
+        else:
+            ex("UPDATE users SET pw=? WHERE id=?", (generate_password_hash(pw), uid)); ex("DELETE FROM otps WHERE uid=?", (uid,))
+            flash("הסיסמה עודכנה. אפשר להתחבר."); return redirect("/login")
+    return render_template("reset")
+
+# ---------- מחיקת חשבון ----------
+@app.route("/account", methods=["GET", "POST"])
+def account():
+    uid = session.get("uid")
+    u = uid and q("SELECT pw FROM users WHERE id=?", (uid,), True)
+    if not u: return redirect("/login")
+    if request.method == "POST":
+        if not check_password_hash(u["pw"], request.form.get("pw", "")):
+            flash("סיסמה שגויה."); return redirect("/account")
+        for t in ("apps", "favs", "ratings", "reports"):      # קודם כל מה שקשור למשרות שהמשתמש פרסם
+            ex(f"DELETE FROM {t} WHERE job_id IN (SELECT id FROM jobs WHERE employer_id=?)", (uid,))
+        for sql in ("DELETE FROM jobs WHERE employer_id=?", "DELETE FROM employers WHERE user_id=?", "DELETE FROM apps WHERE user_id=?",
+                    "DELETE FROM favs WHERE user_id=?", "DELETE FROM ratings WHERE user_id=?", "DELETE FROM reports WHERE user_id=?",
+                    "DELETE FROM otps WHERE uid=?", "DELETE FROM users WHERE id=?"):
+            ex(sql, (uid,))
+        l = session.get("lang"); session.clear()
+        if l: session["lang"] = l
+        flash("החשבון וכל המידע שלו נמחקו."); return redirect("/")
+    return render_template("account")
+
 @app.route("/logout", methods=["POST"])
 def logout():
     l = session.get("lang"); session.clear()
@@ -500,7 +667,7 @@ def me_page():
         try: age = int(f["age"]); assert 14 <= age <= 21
         except Exception: flash("האתר מיועד לגילאי 14–21."); return redirect("/me")
         ex("UPDATE users SET name=?,age=?,city=?,skills=?,experience=?,bio=? WHERE id=?",
-           (f["name"], age, f["city"], f["skills"], f["experience"], f["bio"], uid))
+           (f["name"][:40], age, f["city"][:40], f["skills"][:300], f["experience"][:1000], f["bio"][:1000], uid))
         flash("הפרופיל נשמר ")
         return redirect("/me")
     favs = q(JOB_SQL + "AND j.id IN (SELECT job_id FROM favs WHERE user_id=?)", (uid,))
@@ -527,8 +694,11 @@ def apply(jid):
     if u["age"] < j["min_age"]: flash(f"המשרה מיועדת מגיל {j['min_age']}.")
     elif q("SELECT 1 FROM apps WHERE user_id=? AND job_id=?", (u["id"], jid), True): flash("כבר הגשת מועמדות למשרה הזו.")
     else:
-        ex("INSERT INTO apps(user_id,job_id,message) VALUES(?,?,?)", (u["id"], jid, request.form.get("message", "")))
+        ex("INSERT INTO apps(user_id,job_id,message) VALUES(?,?,?)", (u["id"], jid, request.form.get("message", "")[:500]))
         session["celebrate"] = 1
+        em = q("SELECT email FROM users WHERE id=?", (j["employer_id"],), True)
+        if em: mail_async(em["email"], f"{BRAND} – מועמדות חדשה למשרה: {j['title']}",
+                          f"שלום,\nהתקבלה מועמדות חדשה למשרה \"{j['title']}\".\nלצפייה במועמדים: {site()}/employer/job/{jid}/applicants")
     return redirect(f"/job/{jid}")
 
 @app.route("/rate/<int:jid>", methods=["POST"])
@@ -537,7 +707,7 @@ def rate(jid):
     j = q("SELECT * FROM jobs WHERE id=?", (jid,), True) or abort(404)
     if j["employer_id"] == session["uid"]: flash("אי אפשר לדרג משרה של עצמך.")
     else:
-        s = min(5, max(1, int(request.form.get("stars", 5))))
+        st = request.form.get("stars", "5"); s = min(5, max(1, int(st))) if st.isdigit() else 5
         ex("INSERT INTO ratings(user_id,job_id,stars,comment) VALUES(?,?,?,?) ON CONFLICT(user_id,job_id) DO UPDATE SET stars=excluded.stars, comment=excluded.comment",
            (session["uid"], jid, s, request.form.get("comment", "")[:500]))
         flash("תודה על הדירוג!")
@@ -546,7 +716,9 @@ def rate(jid):
 @app.route("/report/<int:jid>", methods=["POST"])
 @need()
 def report(jid):
-    ex("INSERT INTO reports(job_id,user_id,reason) VALUES(?,?,?)", (jid, session["uid"], request.form.get("reason", "")))
+    j = q("SELECT title FROM jobs WHERE id=?", (jid,), True) or abort(404)
+    ex("INSERT INTO reports(job_id,user_id,reason) VALUES(?,?,?)", (jid, session["uid"], request.form.get("reason", "")[:500]))
+    mail_async(SUPPORT_EMAIL, f"{BRAND} – דיווח על משרה: {j['title']}", f"התקבל דיווח חדש על המשרה \"{j['title']}\".\nלטיפול: {site()}/admin")
     flash("הדיווח התקבל ויבדק על ידי הצוות. תודה ששומרים על הקהילה ")
     return redirect(f"/job/{jid}")
 
@@ -590,10 +762,11 @@ def job_form(jid):
         if jid: ex(f"UPDATE jobs SET {cols} WHERE id=?", v + (jid,)); jx = jid
         else: jx = ex("INSERT INTO jobs(title,city,jtype,wage,min_age,start_h,end_h,days,duration,no_exp,weekend,description,requirements,wage_period,days_per_week,phone,employer_id,approved) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)", v + (uid,))
         _ai_job(jx)
+        mail_async(SUPPORT_EMAIL, f"{BRAND} – משרה חדשה ממתינה לאישור: {f['title']}", f"המשרה \"{f['title']}\" ממתינה לאישור.\nלטיפול: {site()}/admin")
         flash("המשרה נשלחה לבדיקה ותפורסם מיד לאחר האישור."); return redirect("/employer")
     return render_template("jobform", j=j or {}, jid=jid)
 
-@app.route("/employer/job/<int:jid>/toggle")
+@app.route("/employer/job/<int:jid>/toggle", methods=["POST"])
 @need("employer")
 def toggle(jid):
     ex("UPDATE jobs SET active=1-active WHERE id=? AND employer_id=?", (jid, session["uid"])); return redirect("/employer")
@@ -611,13 +784,25 @@ def applicants(jid):
 def app_status(aid):
     a = q("SELECT a.*, j.employer_id FROM apps a JOIN jobs j ON j.id=a.job_id WHERE a.id=?", (aid,), True) or abort(404)
     if a["employer_id"] != session["uid"]: abort(403)
-    ex("UPDATE apps SET status=? WHERE id=?", (request.form["status"], aid))
+    status = request.form.get("status")
+    if status not in STATUSES: abort(400)
+    ex("UPDATE apps SET status=? WHERE id=?", (status, aid))
+    if status != a["status"]:
+        t = q("SELECT u.email, j.title FROM users u, jobs j WHERE u.id=? AND j.id=?", (a["user_id"], a["job_id"]), True)
+        if t: mail_async(t["email"], f"{BRAND} – עדכון במועמדות שלך: {t['title']}",
+                         f"שלום!\nהסטטוס של המועמדות שלך למשרה \"{t['title']}\" התעדכן ל: {status}\nלפרטים: {site()}/me#apps")
     return redirect(f"/employer/job/{a['job_id']}/applicants")
 
 # ===================== ניהול (אימות מעסיקים + דיווחים) =====================
 @app.route("/admin", methods=["GET", "POST"])
 def admin():
-    if request.method == "POST" and request.form.get("code"): session["admin"] = request.form["code"] == ADMIN_CODE
+    if request.method == "POST" and request.form.get("code"):
+        k = "admin" + str(request.remote_addr)
+        if locked(k): flash("יותר מדי ניסיונות. נסו שוב בעוד כמה דקות.")
+        else:
+            session["admin"] = bool(ADMIN_CODE) and secrets.compare_digest(request.form["code"].encode(), ADMIN_CODE.encode())
+            if session["admin"]: FAILS.pop(k, None)
+            else: failed(k)
     if not session.get("admin"): return render_template("admin", ok=False)
     if request.method == "POST" and request.form.get("recheck_emp"):
         verify_async(int(request.form["recheck_emp"])); flash("הבדיקה רצה ברקע. רעננו את הדף בעוד כמה שניות.")
@@ -626,7 +811,12 @@ def admin():
     if request.method == "POST" and request.form.get("recheck"):
         _ai_job(int(request.form["job"]))
     if request.method == "POST" and request.form.get("decide") in ("1", "-1"):
-        ex("UPDATE jobs SET approved=? WHERE id=?", (int(request.form["decide"]), request.form["job"]))
+        ok = request.form["decide"] == "1"; jid = int(request.form["job"]) if request.form.get("job", "").isdigit() else 0
+        ex("UPDATE jobs SET approved=? WHERE id=?", (1 if ok else -1, jid))
+        j = q("SELECT j.title, u.email FROM jobs j JOIN users u ON u.id=j.employer_id WHERE j.id=?", (jid,), True)
+        if j: mail_async(j["email"], f"{BRAND} – המשרה שלך {'אושרה' if ok else 'לא אושרה'}: {j['title']}",
+                         (f"המשרה \"{j['title']}\" אושרה ומפורסמת עכשיו באתר:\n{site()}/job/{jid}" if ok else
+                          f"המשרה \"{j['title']}\" לא אושרה לפרסום. אפשר לערוך אותה ולשלוח שוב:\n{site()}/employer"))
     if request.method == "POST" and request.form.get("close"):
         ex("UPDATE jobs SET active=0 WHERE id=?", (request.form["close"],))
     return render_template("admin", ok=True, ai=AI_ON, emps=q("SELECT * FROM employers"),
@@ -768,7 +958,19 @@ T["auth"] = """{% extends 'base' %}{% block c %}<div class="card narrow"><h1>{{ 
 <form class="f" method="post">{% if reg %}<div><label>שם (או כינוי – לא חובה שם מלא)</label><input name="name" required></div>{% endif %}
 <div><label>אימייל</label><input type="email" name="email" required></div><div><label>סיסמה</label><input type="password" name="pw" required></div>
 <button class="btn">{{ 'יצירת חשבון' if reg else 'כניסה' }}</button></form>
-<p class="mut">{% if reg %}יש כבר חשבון? <a href="/login"><u>התחברות</u></a>{% else %}חדשים כאן? <a href="/register"><u>הרשמה</u></a>{% endif %}</p></div>{% endblock %}"""
+<p class="mut">{% if reg %}יש כבר חשבון? <a href="/login"><u>התחברות</u></a>{% else %}חדשים כאן? <a href="/register"><u>הרשמה</u></a> · <a href="/forgot"><u>שכחתי סיסמה</u></a>{% endif %}</p></div>{% endblock %}"""
+
+T["forgot"] = """{% extends 'base' %}{% block c %}<div class="card narrow"><h1>איפוס סיסמה</h1>
+<p class="mut">הזינו את האימייל שנרשמתם איתו, ונשלח אליו קישור לבחירת סיסמה חדשה.</p>
+<form class="f" method="post"><div><label>אימייל</label><input type="email" name="email" required autofocus></div><button class="btn">שליחת קישור</button></form>
+<p class="mut"><a href="/login"><u>חזרה להתחברות</u></a></p></div>{% endblock %}"""
+
+T["reset"] = """{% extends 'base' %}{% block c %}<div class="card narrow"><h1>סיסמה חדשה</h1>
+<form class="f" method="post"><div><label>סיסמה חדשה (לפחות 8 תווים)</label><input type="password" name="pw" minlength="8" required autofocus></div><button class="btn">שמירת הסיסמה</button></form></div>{% endblock %}"""
+
+T["account"] = """{% extends 'base' %}{% block c %}<div class="card narrow"><h1>הגדרות חשבון</h1><p class="mut" dir="ltr">{{me.email}}</p>
+<h3>מחיקת חשבון</h3><p class="mut">המחיקה סופית: הפרופיל, המועמדויות, המשרות שפרסמתם והדירוגים יימחקו ולא ניתן יהיה לשחזר אותם.</p>
+<form class="f" method="post" onsubmit="return confirm(this.dataset.q)" data-q="למחוק את החשבון לצמיתות?"><div><label>סיסמה לאישור</label><input type="password" name="pw" required></div><button class="btn ghost" style="color:#dc2626">מחיקת החשבון לצמיתות</button></form></div>{% endblock %}"""
 
 T["choose"] = """{% extends 'base' %}{% block c %}<h1 style="text-align:center">איך תרצו להשתמש ב-{{BRAND}}?</h1>
 <p class="mut" style="text-align:center">אפשר להחליף מצב בכל רגע מהתפריט העליון</p>
@@ -795,7 +997,7 @@ T["emp"] = """{% extends 'base' %}{% block c %}<h1> אזור מעסיקים</h1>
 <div><label>על העסק / על העבודה</label><textarea name="about">{{emp.about if emp}}</textarea></div><button class="btn" style="justify-self:start">שמירת פרופיל</button></form>
 {% if emp %}<div class="row"><h2>המשרות שלי</h2><a class="btn" href="/employer/job/0">+ פרסום משרה חדשה</a></div>
 {% for j in js %}<div class="card row" style="margin-bottom:10px"><span><b>{{j.title}}</b> {{'' if j.active else '(לא פעילה)'}}{% if not j.approved %} <span class="tag o">ממתינה לאישור</span>{% endif %} · {{j.napps}} מועמדים</span>
-<span><a class="btn sm blue" href="/employer/job/{{j.id}}/applicants">מועמדים</a> <a class="btn sm ghost" href="/employer/job/{{j.id}}">עריכה</a> <a class="btn sm ghost" href="/employer/job/{{j.id}}/toggle">{{'השהיה' if j.active else 'הפעלה'}}</a></span></div>
+<span><a class="btn sm blue" href="/employer/job/{{j.id}}/applicants">מועמדים</a> <a class="btn sm ghost" href="/employer/job/{{j.id}}">עריכה</a> <form method="post" action="/employer/job/{{j.id}}/toggle" style="display:inline"><button class="btn sm ghost">{{'השהיה' if j.active else 'הפעלה'}}</button></form></span></div>
 {% else %}<div class="card empty">עוד לא פרסמתם משרות</div>{% endfor %}{% endif %}{% endblock %}"""
 
 T["jobform"] = """{% extends 'base' %}{% block c %}<h1>{{ 'עריכת משרה' if jid else 'פרסום משרה חדשה' }}</h1>
@@ -849,8 +1051,10 @@ T["qr"] = """{% extends 'base' %}{% block c %}<div class="card narrow qr"><h1> �
 
 
 T["base"] = """<!doctype html><html lang="{{ 'en' if lang=='en' else 'he' }}" dir="{{ 'ltr' if lang=='en' else 'rtl' }}"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#6cc4ff"><meta name="description" content="TeenJobs – עבודות לבני נוער בישראל. מעסיקים מאומתים, משרות שנבדקות והגשת מועמדות בקליק."><meta property="og:title" content="TeenJobs"><meta property="og:description" content="עבודות לבני נוער בישראל. מעסיקים מאומתים, משרות שנבדקות והגשת מועמדות בקליק."><meta property="og:type" content="website">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%23ff4fa3'/%3E%3Cpath d='M13 3 6 13h5l-1 8 7-10h-5z' fill='%23fff'/%3E%3C/svg%3E"><title>{{BRAND}} – העבודה הראשונה שלך</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#6cc4ff"><meta name="description" content="{{ desc|tr }}"><meta name="robots" content="{{ 'noindex,follow' if noindex else 'index,follow,max-snippet:-1' }}"><link rel="canonical" href="{{ canon }}">{% if GSV %}<meta name="google-site-verification" content="{{ GSV }}">{% endif %}
+<meta property="og:site_name" content="{{ BRAND }}"><meta property="og:title" content="{{ title|tr }}"><meta property="og:description" content="{{ desc|tr }}"><meta property="og:type" content="website"><meta property="og:url" content="{{ canon }}"><meta property="og:locale" content="{{ 'en_US' if lang=='en' else 'he_IL' }}"><meta name="twitter:card" content="summary">
+{% if ld %}<script type="application/ld+json">{{ ld|tojson }}</script>{% endif %}<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%23ff4fa3'/%3E%3Cpath d='M13 3 6 13h5l-1 8 7-10h-5z' fill='%23fff'/%3E%3C/svg%3E"><title>{{ title|tr }}</title>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Heebo:wght@400;600;800&display=swap" rel="stylesheet"><style>{{CSS|safe}}</style>
 <script>try{document.documentElement.classList.add('js');var t=localStorage.getItem('th');if(t)document.documentElement.dataset.theme=t;if(sessionStorage.getItem('ld'))document.documentElement.classList.add('nl');else sessionStorage.setItem('ld','1')}catch(e){}</script></head><body><a class="skip" href="#mn">דלג לתוכן</a>
 <svg width="0" height="0" style="position:absolute"><defs><symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></symbol><symbol id="i-heart" viewBox="0 0 24 24"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1.1L12 21l7.8-7.5 1-1.1a5.5 5.5 0 0 0 0-7.8z"/></symbol><symbol id="i-pin" viewBox="0 0 24 24"><path d="M20 10c0 6-8 12-8 12S4 16 4 10a8 8 0 0 1 16 0z"/><circle cx="12" cy="10" r="3"/></symbol><symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol><symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></symbol><symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></symbol><symbol id="i-briefcase" viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></symbol><symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></symbol><symbol id="i-share" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4"/></symbol><symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></symbol><symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol><symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 5 5L20 7"/></symbol><symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 0 20 15 15 0 0 1 0-20z"/></symbol><symbol id="i-home" viewBox="0 0 24 24"><path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10"/></symbol><symbol id="i-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/></symbol><symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol><symbol id="i-flag" viewBox="0 0 24 24"><path d="M4 22V4m0 0h13l-2 4 2 4H4"/></symbol><symbol id="i-chev" viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></symbol><symbol id="i-smile" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01"/></symbol><symbol id="i-book" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/></symbol><symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20a6 6 0 0 1 12 0M16 4a3 3 0 0 1 0 6M21 20a6 6 0 0 0-4-5.6"/></symbol><symbol id="i-cart" viewBox="0 0 24 24"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.7 13.4a2 2 0 0 0 2 1.6h9.7a2 2 0 0 0 2-1.6L23 6H6"/></symbol><symbol id="i-utensils" viewBox="0 0 24 24"><path d="M3 2v7a3 3 0 0 0 6 0V2M6 2v20M19 2c-2 2-3 5-3 8h3v12"/></symbol><symbol id="i-flame" viewBox="0 0 24 24"><path d="M12 22a7 7 0 0 0 7-7c0-4-3-6-4-10-3 2-5 5-5 8-2-1-3-3-3-5-2 2-2 4-2 6a7 7 0 0 0 7 8z"/></symbol><symbol id="i-truck" viewBox="0 0 24 24"><rect x="1" y="6" width="14" height="10" rx="1"/><path d="M15 9h4l4 4v3h-8"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/></symbol><symbol id="i-leaf" viewBox="0 0 24 24"><path d="M11 20A7 7 0 0 1 4 13c0-6 7-10 16-10 0 9-4 16-9 17z"/><path d="M4 21c4-6 7-9 12-12"/></symbol></defs></svg>
@@ -862,6 +1066,7 @@ T["base"] = """<!doctype html><html lang="{{ 'en' if lang=='en' else 'he' }}" di
 {% if me %}<div class="user"><button class="ubtn" type="button" onclick="this.parentNode.classList.toggle('open')"><span class="av">{{ (me.name or me.email)[0]|upper }}</span><b>{{ me.name or me.email.split('@')[0] }}</b></button>
 <div class="menu"><div class="mail">{{me.email}}</div>
 <a href="{{ '/employer' if mode=='employer' else '/me' if mode=='teen' else '/choose' }}">הפרופיל שלי</a>
+<a href="/account">הגדרות חשבון</a>
 <a href="/switch/{{ 'teen' if mode=='employer' else 'employer' }}">{{ 'מעבר לחשבון נוער' if mode=='employer' else 'מעבר לחשבון עסק' }}</a>
 <form method="post" action="/logout"><button class="out">התנתקות</button></form></div></div>
 {% else %}<a href="/login">התחברות</a><a class="btn sm" href="/jobs">מציאת עבודה</a>{% endif %}
@@ -872,7 +1077,7 @@ T["base"] = """<!doctype html><html lang="{{ 'en' if lang=='en' else 'he' }}" di
 {{BRAND}} © · גרסה 2.3 · אנו פועלים לפי חוק עבודת הנוער, התשי"ג-1953 · נתקלתם במשרה חשודה? דווחו עליה בדף המשרה.</footer>
 <nav class="tabbar"><a href="/"><svg class="i"><use href="#i-home"/></svg>בית</a><a href="/jobs"><svg class="i"><use href="#i-search"/></svg>חיפוש</a><a href="{{ '/me' if me else '/login' }}"><svg class="i"><use href="#i-heart"/></svg>שמורות</a><a href="{{ '/me' if me else '/login' }}"><svg class="i"><use href="#i-user"/></svg>החשבון</a></nav>
 <script>const $=s=>document.querySelector(s);
-addEventListener('load',()=>{const l=$('#ld');if(l){l.classList.add('x');setTimeout(()=>l.remove(),500)}});setTimeout(()=>$('#ld')&&$('#ld').classList.add('x'),2500);
+requestAnimationFrame(()=>{const l=$('#ld');if(l){l.classList.add('x');setTimeout(()=>l.remove(),500)}});setTimeout(()=>$('#ld')&&$('#ld').classList.add('x'),2500);
 addEventListener('scroll',()=>$('#nv').classList.toggle('sc',scrollY>8),{passive:true});
 $('#thm').onclick=()=>{const d=document.documentElement,n=d.dataset.theme==='dark'?'light':'dark';d.dataset.theme=n;try{localStorage.setItem('th',n)}catch(e){}};
 $('#bg').onclick=()=>$('#lk').classList.toggle('open');
@@ -891,8 +1096,8 @@ T["card"] = """<article class="job"><a class="stretch" href="/job/{{j.id}}" aria
 <div><span class="tag">{{j.duration|tr}}</span>{% if j.no_exp %}<span class="tag g">מתאים למתחילים</span>{% endif %}{% if j.weekend %}<span class="tag p">סופי שבוע</span>{% endif %}{% if me and me.city and me.city==j.city %}<span class="tag">קרוב אליך</span>{% endif %}{% if not j.verified %}{% if j.ai_ok %}<span class="tag">נבדק אוטומטית</span>{% else %}<span class="tag o">לא מאומת</span>{% endif %}{% endif %}</div>
 <div class="foot"><small class="mut">פורסם {{ (j.created|string)[:10] }}{% if j.cnt %} · <span class="stars">★</span> {{ '%.1f'|format(j.avg) }}{% endif %}</small><span class="go">לצפייה במשרה</span></div></article>"""
 
-T["jobs"] = """{% extends 'base' %}{% block c %}<h1 style="font-size:2rem">חיפוש משרות</h1>
-<div class="lay"><details class="card fl" id="fl" open><summary>סינון</summary><form class="f" id="ff" method="get">
+T["jobs"] = """{% extends 'base' %}{% block c %}<h1 style="font-size:2rem">{{ h1 or 'חיפוש משרות' }}</h1>{% if intro %}<p class="lead" style="margin-bottom:18px">{{ intro }}</p>{% endif %}
+<div class="lay"><details class="card fl" id="fl" open><summary>סינון</summary><form class="f" id="ff" method="get" action="/jobs">
 <div><label>חיפוש חופשי</label><input name="q" value="{{a.q or ''}}"></div>
 <div><label>עיר</label><select name="city"><option value="">הכל</option>{% for c in CITIES %}<option {{'selected' if a.city==c}} value="{{c}}">{{c|tr}}</option>{% endfor %}</select></div>
 <div><label>הגיל שלי</label><input type="number" min="14" max="21" name="age" value="{{a.age or ''}}"></div>
@@ -909,7 +1114,7 @@ T["jobs"] = """{% extends 'base' %}{% block c %}<h1 style="font-size:2rem">חי�
 
 T["job"] = """{% extends 'base' %}{% block c %}
 {% if celebrate %}<div class="ok-ov" onclick="this.remove()"><div class="ok-card"><svg class="ck" viewBox="0 0 52 52"><circle cx="26" cy="26" r="24"/><path d="m15 27 8 8 14-16"/></svg><h2 style="margin:12px 0 6px">המועמדות שלך נשלחה!</h2><p class="mut">עכשיו מחכים לתשובה.</p><button class="btn">מעולה</button></div></div>{% endif %}
-<a class="mut" href="/jobs">→ חזרה</a>
+<nav class="mut sm" aria-label="breadcrumb"><a href="/"><u>בית</u></a> › <a href="/jobs"><u>חיפוש משרות</u></a>{% if CITY_URL.get(j.city) %} › <a href="{{ CITY_URL[j.city] }}"><u>{{ j.city|tr }}</u></a>{% endif %}{% if TYPE_URL.get(j.jtype) %} › <a href="{{ TYPE_URL[j.jtype] }}"><u>{{ j.jtype|tr }}</u></a>{% endif %}</nav>
 <div class="jp" style="margin-top:14px"><div>
 <div class="card"><div class="row top"><div class="ava lg">{{ j.business[0]|upper }}</div><div class="grow"><h1 style="font-size:1.9rem;margin:0">{{j.title}}</h1><div class="mut">{{j.business}} · {{j.city|tr}} · {{j.jtype|tr}}</div></div></div>
 <div style="margin-top:12px">{% if j.verified %}<span class="tag g"><svg class="i"><use href="#i-shield"/></svg> מעסיק מאומת</span>{% elif j.ai_ok %}<span class="tag">נבדק אוטומטית, עדיין ללא אימות צוות</span>{% else %}<span class="tag o">מעסיק שטרם אומת – היזהרו ואל תמסרו מידע אישי</span>{% endif %}
@@ -927,9 +1132,10 @@ T["job"] = """{% extends 'base' %}{% block c %}
 {% elif mode=='teen' %}<form class="f" method="post" action="/apply/{{j.id}}"><textarea name="message" placeholder="הודעה קצרה למעסיק (לא לכתוב טלפון/כתובת)"></textarea><button class="btn lg">שליחת מועמדות</button></form>
 {% elif not me %}<a class="btn lg" href="/login?next=/job/{{j.id}}" style="width:100%">התחברו כדי להגיש מועמדות</a>
 {% else %}<p class="mut">עברו למצב "מחפש עבודה" בתפריט כדי להגיש מועמדות.</p>{% endif %}
-<div class="row" style="margin-top:14px"><form method="post" action="/fav/{{j.id}}"><button class="btn ghost sm"><svg class="i"><use href="#i-heart"/></svg> {{ 'שמור' if j.id not in favs else 'שמור' }}</button></form>
+<div class="row" style="margin-top:14px"><form method="post" action="/fav/{{j.id}}"><button class="btn ghost sm"><svg class="i"><use href="#i-heart"/></svg> {{ 'שמור' if j.id not in favs else 'הסר מהשמורות' }}</button></form>
 <button class="btn ghost sm" type="button" onclick="navigator.share?navigator.share({title:document.title,url:location.href}):navigator.clipboard.writeText(location.href).then(()=>this.textContent='הקישור הועתק')"><svg class="i"><use href="#i-share"/></svg> שיתוף</button></div>
-<p class="mut sm" style="margin-top:14px"><svg class="i"><use href="#i-lock"/></svg> אל תמסרו כתובת, טלפון או פרטים רגישים לפני שהמעסיק אומת.</p></aside></div>{% endblock %}"""
+<p class="mut sm" style="margin-top:14px"><svg class="i"><use href="#i-lock"/></svg> אל תמסרו כתובת, טלפון או פרטים רגישים לפני שהמעסיק אומת.</p></aside></div>
+{% if more %}<h2>עוד משרות באזור</h2><div class="grid">{% for j in more %}{% include 'card' %}{% endfor %}</div>{% endif %}{% endblock %}"""
 
 T["faq"] = """{% extends 'base' %}{% block c %}<div class="doc"><h1>שאלות נפוצות</h1><br>
 <details class="q"><summary>מאיזה גיל אפשר לעבוד?</summary><p>החוק בישראל מאפשר להעסיק בני נוער מגיל 14, בכפוף למגבלות על סוגי עבודה, שעות ושכר. מתחת לגיל 16 חלות מגבלות מחמירות יותר, והאחריות לעמוד בהן היא על המעסיק. באתר לא ניתן לפרסם משרות שלא מתאימות לגיל.</p></details>
@@ -972,10 +1178,11 @@ T["home"] = """{% extends 'base' %}{% block c %}
 <li><span class="fi v"><svg class="i"><use href="#i-send"/></svg></span><div><b>מגישים מועמדות</b><small>בלי למסור פרטים רגישים</small></div></li></ol></aside></section>
 <div class="ticker rv" aria-hidden="true"><div class="tk">{% for k in range(2) %}{% for t in TYPES %}{% if t!='אחר' %}<span>{{t|tr}}</span>{% endif %}{% endfor %}{% endfor %}</div></div>
 {% if st.jobs or st.biz or st.teens %}<section class="kpis rv"><div class="kpi"><b data-n="{{st.jobs}}">0</b>משרות פעילות</div><div class="kpi"><b data-n="{{st.biz}}">0</b>עסקים מאומתים</div><div class="kpi"><b data-n="{{st.teens}}">0</b>בני נוער רשומים</div></section>{% endif %}
-<h2 class="rv">מה מעניין אותך?</h2><div class="tiles rv">{% for t in TYPES %}{% if t!='אחר' %}<a class="tile" href="/jobs?jtype={{ t|urlencode }}"><span class="fi"><svg class="i"><use href="#i-{{ TICON.get(t,'briefcase') }}"/></svg></span><div><b>{{t|tr}}</b><small>{% if cats.get(t) %}{{cats[t]}} משרות{% else %}בקרוב{% endif %}</small></div></a>{% endif %}{% endfor %}</div>
+<h2 class="rv">מה מעניין אותך?</h2><div class="tiles rv">{% for t in TYPES %}{% if t!='אחר' %}<a class="tile" href="{{ TYPE_URL[t] }}"><span class="fi"><svg class="i"><use href="#i-{{ TICON.get(t,'briefcase') }}"/></svg></span><div><b>{{t|tr}}</b><small>{% if cats.get(t) %}{{cats[t]}} משרות{% else %}בקרוב{% endif %}</small></div></a>{% endif %}{% endfor %}</div>
 <h2 class="rv" id="rec">אולי העבודה הבאה שלך נמצאת כאן.</h2>
 {% if pop %}<div class="rail rv">{% for j in pop %}{% include 'card' %}{% endfor %}</div><a class="btn ghost" href="/jobs">צפה בכל המשרות</a>
 {% else %}<div class="card empty rv">עדיין לא פורסמו משרות. מעסיקים – היו הראשונים!<br><br><a class="btn" href="/employers">פרסום משרה חדשה</a></div>{% endif %}
+<h2 class="rv">עבודות לפי עיר</h2><div class="chips rv">{% for c in CITIES %}{% if CITY_URL.get(c) %}<a href="{{ CITY_URL[c] }}">{{ c|tr }}</a>{% endif %}{% endfor %}</div>
 <h2 class="rv" id="how">איך זה עובד?</h2><div class="steps rv">
 <div class="card step"><b class="n">1</b><span class="fi"><svg class="i"><use href="#i-user"/></svg></span><h3>נרשמים</h3><p class="mut">יוצרים פרופיל אישי בכמה דקות.</p></div>
 <div class="card step"><b class="n">2</b><span class="fi v"><svg class="i"><use href="#i-search"/></svg></span><h3>מוצאים עבודה</h3><p class="mut">מחפשים משרות שמתאימות לגיל, לאזור ולזמינות.</p></div>
@@ -1021,6 +1228,36 @@ EX = dict(l.split(" => ") for l in """
 """.strip().splitlines())
 
 EN = dict(l.split(" => ") for l in """
+עבודות לבני נוער בישראל => Jobs for teens in Israel
+חיפוש משרות לבני נוער => Job search for teens
+פרסום משרה לבני נוער – למעסיקים => Post a job for teens - for employers
+שאלות נפוצות על עבודה לבני נוער => FAQ about teen jobs
+לוח משרות לבני נוער בגילאי 14–21: בייביסיטר, דוג ווקר, מסעדות, חנויות ועוד. מעסיקים מאומתים, משרות שנבדקות והגשת מועמדות בקליק. => A job board for teens aged 14–21: babysitting, dog walking, restaurants, shops and more. Verified employers, reviewed jobs and one-click applications.
+כל המשרות הפתוחות לבני נוער: סינון לפי עיר, גיל, שכר ושעות. מגישים מועמדות אונליין בחינם. => All open jobs for teens: filter by city, age, pay and hours. Apply online for free.
+מחפשים עובדים צעירים? מפרסמים משרה בחינם, היא נבדקת לפי חוק עבודת הנוער, ומקבלים מועמדים בגילאי 14–21. => Looking for young workers? Post a job for free, it is checked against the youth employment law, and you receive applicants aged 14–21.
+מאיזה גיל מותר לעבוד, כמה שעות, מה השכר המינימלי לנוער ואיך מגישים מועמדות למשרה. => From what age you can work, how many hours, the minimum wage for teens and how to apply for a job.
+עבודות לפי עיר => Jobs by city
+עוד משרות באזור => More jobs in the area
+שכחתי סיסמה => Forgot password
+איפוס סיסמה => Reset password
+הזינו את האימייל שנרשמתם איתו, ונשלח אליו קישור לבחירת סיסמה חדשה. => Enter the email you signed up with and we will send a link to choose a new password.
+שליחת קישור => Send link
+חזרה להתחברות => Back to log in
+סיסמה חדשה (לפחות 8 תווים) => New password (at least 8 characters)
+סיסמה חדשה => New password
+שמירת הסיסמה => Save password
+הגדרות חשבון => Account settings
+מחיקת החשבון לצמיתות => Delete account permanently
+מחיקת חשבון => Delete account
+המחיקה סופית: הפרופיל, המועמדויות, המשרות שפרסמתם והדירוגים יימחקו ולא ניתן יהיה לשחזר אותם. => Deletion is final: your profile, applications, posted jobs and ratings will be removed and cannot be restored.
+למחוק את החשבון לצמיתות? => Delete the account permanently?
+סיסמה לאישור => Password to confirm
+הסר מהשמורות => Remove from saved
+אם האימייל רשום אצלנו, שלחנו אליו קישור לאיפוס הסיסמה. => If that email is registered, we sent it a password reset link.
+הקישור אינו תקין או שפג תוקפו. בקשו קישור חדש. => The link is invalid or expired. Request a new one.
+הסיסמה עודכנה. אפשר להתחבר. => Password updated. You can log in now.
+סיסמה שגויה. => Wrong password.
+החשבון וכל המידע שלו נמחקו. => The account and all its data were deleted.
 עבר בדיקה אוטומטית, ממתין לאישור הצוות => Passed the automatic check, awaiting team approval
 המלצת AI: לאשר => AI recommends: approve
 שימו לב: מספר העוסק/ח"פ שהוזן אינו תקין. תקנו אותו כדי לקבל אימות. => Note: the business ID you entered is not valid. Fix it to get verified.
