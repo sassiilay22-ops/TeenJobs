@@ -15,6 +15,7 @@ from markupsafe import escape, Markup
 ADMIN_CODE = os.environ.get("ADMIN_CODE", "")      # קוד כניסה לדף /admin (חובה להגדיר, אחרת הדף נעול)
 BRAND = os.environ.get("BRAND", "TeenJobs")
 SUPPORT_EMAIL = os.environ.get("SUPPORT_EMAIL", "")
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "") or SUPPORT_EMAIL      # לכאן נשלחות ההתראות למנהל (לא מוצג באתר, בניגוד ל-SUPPORT_EMAIL)
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 EMAIL_FROM = os.environ.get("EMAIL_FROM", "TeenJobs <onboarding@resend.dev>")
@@ -502,10 +503,18 @@ def _ai_emp(uid):
 def verify_async(uid):
     """מריץ את האימות ברקע, כדי שהשמירה לא תיתקע (חיפוש ברשת יכול לקחת יותר מה-timeout של gunicorn)."""
     ex("UPDATE employers SET ai_note=?, ai_ok=0 WHERE user_id=?", ("⏳ בבדיקה אוטומטית…", uid))
+    base = site()
     def run():
         with app.app_context():
             try: _ai_emp(uid)
             except Exception as err: print("⚠ אימות העסק נכשל:", err)
+            try:      # מייל למנהל על כל פרופיל עסק שנשמר, עם ממצאי הבדיקה האוטומטית
+                e = q("SELECT business, city, reg_no, ai_note, verified FROM employers WHERE user_id=?", (uid,), True)
+                if e and ADMIN_EMAIL and not e["verified"]:
+                    send_mail(ADMIN_EMAIL, f"{BRAND} – עסק ממתין לאימות: {e['business']}",
+                              f"פרופיל עסק נשמר וממתין לאימות שלך.\nשם: {e['business']}\nעיר: {e['city']}\nמספר עוסק: {e['reg_no'] or 'לא צוין'}\n"
+                              f"בדיקה אוטומטית: {e['ai_note'] or 'אין'}\nלאישור: {base}/admin")
+            except Exception as err: print("⚠ שליחת ההתראה למנהל נכשלה:", err)
     threading.Thread(target=run, daemon=True).start()
 
 @app.errorhandler(404)
@@ -850,7 +859,7 @@ def report(jid):
     n = q("SELECT COUNT(DISTINCT user_id) c FROM reports WHERE job_id=?", (jid,), True)["c"]
     hidden = n >= REPORT_LIMIT
     if hidden: ex("UPDATE jobs SET approved=0 WHERE id=? AND approved=1", (jid,))      # יורדת מהאתר וחוזרת לרשימת הממתינות בניהול
-    mail_async(SUPPORT_EMAIL, f"{BRAND} – דיווח על משרה: {j['title']}",
+    mail_async(ADMIN_EMAIL,f"{BRAND} – דיווח על משרה: {j['title']}",
                f"התקבל דיווח חדש על המשרה \"{j['title']}\" ({n} דיווחים עד כה)."
                + ("\nהמשרה הורדה אוטומטית מהאתר עד שתבדקו אותה." if hidden else "") + f"\nלטיפול: {site()}/admin")
     if hidden:
@@ -906,7 +915,7 @@ def job_form(jid):
         verdict = _ai_job(jx)
         if verdict == "published": flash("המשרה נבדקה, אושרה ופורסמה באתר!")
         elif verdict != "reject":      # ספק או שה-AI לא זמין – מחכה לאישור ידני, והמנהל מקבל מייל
-            mail_async(SUPPORT_EMAIL, f"{BRAND} – משרה חדשה ממתינה לאישור: {f['title']}", f"המשרה \"{f['title']}\" ממתינה לאישור.\nלטיפול: {site()}/admin")
+            mail_async(ADMIN_EMAIL,f"{BRAND} – משרה חדשה ממתינה לאישור: {f['title']}", f"המשרה \"{f['title']}\" ממתינה לאישור.\nלטיפול: {site()}/admin")
             flash("המשרה נשלחה לבדיקה ותפורסם מיד לאחר האישור.")
         return redirect("/employer")
     return render_template("jobform", j=j or {}, jid=jid, sel_days=(j["days"] or "").replace(" ", "").split(",") if j else [])
@@ -1265,7 +1274,7 @@ T["base"] = """<!doctype html><html lang="{{ 'en' if lang=='en' else 'he' }}" di
 {% for m in get_flashed_messages() %}<div class="flash">{{m|tr}}</div>{% endfor %}
 <main id="mn">{% block c %}{% endblock %}</main>
 <footer><nav><a href="/jobs">חיפוש עבודה</a><a href="/employers">למעסיקים</a><a href="/faq">שאלות נפוצות</a><a href="/terms">תנאי שימוש</a><a href="/privacy">מדיניות פרטיות</a><a href="/support">תמיכה ויצירת קשר</a></nav>
-{{BRAND}} © · גרסה 3.3 · אנו פועלים לפי חוק עבודת הנוער, התשי"ג-1953 · נתקלתם במשרה חשודה? דווחו עליה בדף המשרה.</footer>
+{{BRAND}} © · גרסה 3.4 · אנו פועלים לפי חוק עבודת הנוער, התשי"ג-1953 · נתקלתם במשרה חשודה? דווחו עליה בדף המשרה.</footer>
 <nav class="tabbar"><a href="/"><svg class="i"><use href="#i-home"/></svg>בית</a><a href="/jobs"><svg class="i"><use href="#i-search"/></svg>חיפוש</a><a href="{{ '/me' if me else '/login' }}"><svg class="i"><use href="#i-heart"/></svg>שמורות</a><a href="{{ '/me' if me else '/login' }}"><svg class="i"><use href="#i-user"/></svg>החשבון</a></nav>
 <script>const $=s=>document.querySelector(s);
 requestAnimationFrame(()=>{const l=$('#ld');if(l){l.classList.add('x');setTimeout(()=>l.remove(),500)}});setTimeout(()=>$('#ld')&&$('#ld').classList.add('x'),2500);
@@ -1540,7 +1549,7 @@ TeenJobs – עבודות לבני נוער בישראל. מעסיקים מאו�
 תנאי שימוש => Terms of use
 מדיניות פרטיות => Privacy policy
 תמיכה ויצירת קשר => Support & contact
-© · גרסה 3.3 · אנו פועלים לפי חוק עבודת הנוער, התשי"ג-1953 · נתקלתם במשרה חשודה? דווחו עליה בדף המשרה. => © · Version 3.3 · We follow the Youth Employment Law, 1953 · Found a suspicious job? Report it on the job page.
+© · גרסה 3.4 · אנו פועלים לפי חוק עבודת הנוער, התשי"ג-1953 · נתקלתם במשרה חשודה? דווחו עליה בדף המשרה. => © · Version 3.4 · We follow the Youth Employment Law, 1953 · Found a suspicious job? Report it on the job page.
 בית => Home
 חיפוש => Search
 שמורות => Saved
