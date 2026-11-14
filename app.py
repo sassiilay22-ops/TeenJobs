@@ -25,7 +25,8 @@ PG = DATABASE_URL.startswith("postgres")
 DB = os.environ.get("SQLITE_PATH", "teenjob.db")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")   # מפתח API של Claude (מ-console.anthropic.com)
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-5-5")
-AI_AUTO_APPROVE = os.environ.get("AI_AUTO_APPROVE", "0") == "1"   # 1 = משרה ש-Claude אישר מתפרסמת מיד (מומלץ להשאיר 0)
+AI_AUTO_APPROVE = os.environ.get("AI_AUTO_APPROVE", "1") == "1"   # משרה ש-Claude אישר בביטחון מתפרסמת מיד; 0 = הכול מחכה לאישור ידני
+REPORT_LIMIT = 3          # אחרי כמה דיווחים (ממשתמשים שונים) משרה יורדת אוטומטית לבדיקה
 AI_AUTO_VERIFY = os.environ.get("AI_AUTO_VERIFY", "0") == "1"   # 1 = עסק ש-Claude מצא אמין מקבל תג "מאומת" מיד
 AI_WEB_SEARCH = os.environ.get("AI_WEB_SEARCH", "0") == "1"     # 1 = Claude מחפש את העסק ברשת (דורש הפעלת web search ב-Console)
 AI_ON = bool(ANTHROPIC_API_KEY)
@@ -131,6 +132,19 @@ def period_of(f):
 def phone_ok(p):
     return not p or re.fullmatch(r"(\+972|0)[\d\- ]{8,12}", p)
 
+_FINAL_MID = re.compile("[ךםןףץ](?=[א-ת])")          # אות סופית באמצע מילה – סימן מובהק להקלדה אקראית
+_CONSONANTS = re.compile("[b-df-hj-np-tv-xzB-DF-HJ-NP-TV-XZ]{6,}")
+def junk(text, min_letters=2):
+    """True כשהטקסט נראה כמו הקלדה אקראית ולא כמו מילים אמיתיות (סינון חינמי, לפני ה-AI)."""
+    t = (text or "").strip()
+    letters = re.findall("[A-Za-zא-ת]", t)
+    if len(letters) < min_letters: return True
+    if len(letters) < len(re.sub(r"\s", "", t)) * 0.5: return True       # בעיקר ספרות וסימנים
+    if re.search("([A-Za-zא-ת])\\1{3,}", t): return True                 # אותה אות 4 פעמים ברצף
+    words = re.findall("[A-Za-zא-ת]{2,}", t)
+    bad = sum(1 for w in words if _FINAL_MID.search(w) or _CONSONANTS.search(w) or (len(w) >= 8 and len(set(w)) <= 3))
+    return bad > 0 and bad >= len(words) * 0.3
+
 def validate_job(f):
     err = []
     try:
@@ -153,6 +167,9 @@ def validate_job(f):
     elif wage < floor: err.append(f"השכר נמוך מהמינימום החוקי לגיל זה (כ-{floor} ₪ לשעה).")
     if not phone_ok(f.get("phone", "").strip()): err.append("מספר הטלפון אינו תקין (למשל 050-1234567).")
     if len(f.get("description", "").strip()) < 20: err.append("יש לכתוב תיאור משרה של לפחות 20 תווים.")
+    elif junk(f.get("description", ""), 15) or len(f.get("description", "").split()) < 4:
+        err.append("תיאור המשרה אינו ברור. תארו במילים פשוטות מה עושים בעבודה.")
+    if junk(f.get("title", ""), 3): err.append("שם המשרה אינו ברור. כתבו שם אמיתי, למשל: בייביסיטר לשני ילדים.")
     return err
 
 # ===================== עזרים =====================
@@ -325,11 +342,18 @@ def _ai_job(jid):
     j = q("SELECT j.*, e.business, e.about FROM jobs j JOIN employers e ON e.user_id=j.employer_id WHERE j.id=?", (jid,), True)
     cols = ("business", "about", "title", "jtype", "city", "min_age", "start_h", "end_h", "wage", "wage_period", "days", "duration", "description", "requirements")
     r = ai_review("משרה", "\n".join(f"{k}: {j[k]}" for k in cols))
-    if not r: return
+    if not r: return None
     v, risk, note, _ = r
+    publish = v == "approve" and risk <= 30 and AI_AUTO_APPROVE      # רק אישור ברור מתפרסם לבד; כל ספק נשאר לבדיקה ידנית
     ex("UPDATE jobs SET ai_verdict=?, ai_note=?, approved=? WHERE id=?",
-       (v, f"{risk}/100 · {note}", -1 if v == "reject" else (1 if v == "approve" and AI_AUTO_APPROVE else 0), jid))
-    if v == "reject": flash("הבדיקה האוטומטית זיהתה בעיה במשרה: " + note)
+       (v, f"{risk}/100 · {note}", -1 if v == "reject" else (1 if publish else 0), jid))
+    if v == "reject":
+        flash("הבדיקה האוטומטית זיהתה בעיה במשרה: " + note)
+        em = q("SELECT email FROM users WHERE id=?", (j["employer_id"],), True)
+        if em: mail_async(em["email"], f"{BRAND} – המשרה שלך לא אושרה: {j['title']}",
+                          f"שלום,\nהמשרה \"{j['title']}\" לא אושרה לפרסום בבדיקה האוטומטית.\nהסיבה: {note}\n"
+                          f"אפשר לתקן אותה ולשלוח שוב: {site()}/employer\nחושבים שזו טעות? השיבו למייל הזה.")
+    return "published" if publish else v
 
 # ---------- אימות עסקים: בדיקה מול רשם החברות + Claude ----------
 def valid_id(n):
@@ -726,7 +750,14 @@ def rate(jid):
 def report(jid):
     j = q("SELECT title FROM jobs WHERE id=?", (jid,), True) or abort(404)
     ex("INSERT INTO reports(job_id,user_id,reason) VALUES(?,?,?)", (jid, session["uid"], request.form.get("reason", "")[:500]))
-    mail_async(SUPPORT_EMAIL, f"{BRAND} – דיווח על משרה: {j['title']}", f"התקבל דיווח חדש על המשרה \"{j['title']}\".\nלטיפול: {site()}/admin")
+    n = q("SELECT COUNT(DISTINCT user_id) c FROM reports WHERE job_id=?", (jid,), True)["c"]
+    hidden = n >= REPORT_LIMIT
+    if hidden: ex("UPDATE jobs SET approved=0 WHERE id=? AND approved=1", (jid,))      # יורדת מהאתר וחוזרת לרשימת הממתינות בניהול
+    mail_async(SUPPORT_EMAIL, f"{BRAND} – דיווח על משרה: {j['title']}",
+               f"התקבל דיווח חדש על המשרה \"{j['title']}\" ({n} דיווחים עד כה)."
+               + ("\nהמשרה הורדה אוטומטית מהאתר עד שתבדקו אותה." if hidden else "") + f"\nלטיפול: {site()}/admin")
+    if hidden:
+        flash("הדיווח התקבל ויבדק על ידי הצוות. תודה ששומרים על הקהילה "); return redirect("/jobs")
     flash("הדיווח התקבל ויבדק על ידי הצוות. תודה ששומרים על הקהילה ")
     return redirect(f"/job/{jid}")
 
@@ -738,6 +769,8 @@ def employer():
     emp = q("SELECT * FROM employers WHERE user_id=?", (uid,), True)
     if request.method == "POST":
         f = request.form
+        if junk(f.get("business", ""), 2):
+            flash("שם העסק אינו ברור. כתבו את השם האמיתי של העסק או של העבודה."); return redirect("/employer")
         if emp: ex("UPDATE employers SET verified=CASE WHEN business=? AND COALESCE(reg_no,'')=? THEN verified ELSE 0 END, business=?,city=?,about=?,reg_no=? WHERE user_id=?",
                    (f["business"], f["reg_no"], f["business"], f["city"], f["about"], f["reg_no"], uid))
         else: ex("INSERT INTO employers(user_id,business,city,about,reg_no) VALUES(?,?,?,?,?)",
@@ -769,9 +802,12 @@ def job_form(jid):
         cols = "title=?,city=?,jtype=?,wage=?,min_age=?,start_h=?,end_h=?,days=?,duration=?,no_exp=?,weekend=?,description=?,requirements=?,wage_period=?,days_per_week=?,phone=?,approved=0"
         if jid: ex(f"UPDATE jobs SET {cols} WHERE id=?", v + (jid,)); jx = jid
         else: jx = ex("INSERT INTO jobs(title,city,jtype,wage,min_age,start_h,end_h,days,duration,no_exp,weekend,description,requirements,wage_period,days_per_week,phone,employer_id,approved) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)", v + (uid,))
-        _ai_job(jx)
-        mail_async(SUPPORT_EMAIL, f"{BRAND} – משרה חדשה ממתינה לאישור: {f['title']}", f"המשרה \"{f['title']}\" ממתינה לאישור.\nלטיפול: {site()}/admin")
-        flash("המשרה נשלחה לבדיקה ותפורסם מיד לאחר האישור."); return redirect("/employer")
+        verdict = _ai_job(jx)
+        if verdict == "published": flash("המשרה נבדקה, אושרה ופורסמה באתר!")
+        elif verdict != "reject":      # ספק או שה-AI לא זמין – מחכה לאישור ידני, והמנהל מקבל מייל
+            mail_async(SUPPORT_EMAIL, f"{BRAND} – משרה חדשה ממתינה לאישור: {f['title']}", f"המשרה \"{f['title']}\" ממתינה לאישור.\nלטיפול: {site()}/admin")
+            flash("המשרה נשלחה לבדיקה ותפורסם מיד לאחר האישור.")
+        return redirect("/employer")
     return render_template("jobform", j=j or {}, jid=jid)
 
 @app.route("/employer/job/<int:jid>/toggle", methods=["POST"])
@@ -821,6 +857,7 @@ def admin():
     if request.method == "POST" and request.form.get("decide") in ("1", "-1"):
         ok = request.form["decide"] == "1"; jid = int(request.form["job"]) if request.form.get("job", "").isdigit() else 0
         ex("UPDATE jobs SET approved=? WHERE id=?", (1 if ok else -1, jid))
+        if ok: ex("DELETE FROM reports WHERE job_id=?", (jid,))      # אישור ידני מנקה דיווחים ישנים, כדי שהמשרה לא תרד שוב מיד
         j = q("SELECT j.title, u.email FROM jobs j JOIN users u ON u.id=j.employer_id WHERE j.id=?", (jid,), True)
         if j: mail_async(j["email"], f"{BRAND} – המשרה שלך {'אושרה' if ok else 'לא אושרה'}: {j['title']}",
                          (f"המשרה \"{j['title']}\" אושרה ומפורסמת עכשיו באתר:\n{site()}/job/{jid}" if ok else
@@ -1029,7 +1066,7 @@ T["emp"] = """{% extends 'base' %}{% block c %}<h1> אזור מעסיקים</h1>
 <div><label>אימות: מספר עוסק/ח"פ (לעסק) או "פרטי"</label><input name="reg_no" maxlength="30" value="{{emp.reg_no if emp}}"></div></div>
 <div><label>על העסק / על העבודה</label><textarea name="about">{{emp.about if emp}}</textarea></div><button class="btn" style="justify-self:start">שמירת פרופיל</button></form>
 {% if emp %}<div class="row"><h2>המשרות שלי</h2><a class="btn" href="/employer/job/0">+ פרסום משרה חדשה</a></div>
-{% for j in js %}<div class="card row" style="margin-bottom:10px"><span><b>{{j.title}}</b> {{'' if j.active else '(לא פעילה)'}}{% if not j.approved %} <span class="tag o">ממתינה לאישור</span>{% endif %} · {{j.napps}} מועמדים</span>
+{% for j in js %}<div class="card row" style="margin-bottom:10px"><span><b>{{j.title}}</b> {{'' if j.active else '(לא פעילה)'}}{% if j.approved == -1 %} <span class="tag p">לא אושרה</span>{% elif not j.approved %} <span class="tag o">ממתינה לאישור</span>{% else %} <span class="tag g">מפורסמת</span>{% endif %} · {{j.napps}} מועמדים</span>
 <span><a class="btn sm blue" href="/employer/job/{{j.id}}/applicants">מועמדים</a> <a class="btn sm ghost" href="/employer/job/{{j.id}}">עריכה</a> <form method="post" action="/employer/job/{{j.id}}/toggle" style="display:inline"><button class="btn sm ghost">{{'השהיה' if j.active else 'הפעלה'}}</button></form></span></div>
 {% else %}<div class="card empty">עוד לא פרסמתם משרות</div>{% endfor %}{% endif %}{% endblock %}"""
 
@@ -1261,6 +1298,12 @@ EX = dict(l.split(" => ") for l in """
 """.strip().splitlines())
 
 EN = dict(l.split(" => ") for l in """
+לא אושרה => Not approved
+מפורסמת => Published
+המשרה נבדקה, אושרה ופורסמה באתר! => The job was checked, approved and published on the site!
+תיאור המשרה אינו ברור. תארו במילים פשוטות מה עושים בעבודה. => The job description is unclear. Describe in simple words what the job involves.
+שם המשרה אינו ברור. כתבו שם אמיתי, למשל: בייביסיטר לשני ילדים. => The job title is unclear. Write a real title, for example: Babysitter for two kids.
+שם העסק אינו ברור. כתבו את השם האמיתי של העסק או של העבודה. => The business name is unclear. Write the real name of the business or the job.
 משתמשים רשומים => Registered users
 עבודות לבני נוער בישראל => Jobs for teens in Israel
 חיפוש משרות לבני נוער => Job search for teens
