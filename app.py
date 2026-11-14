@@ -142,8 +142,18 @@ def junk(text, min_letters=2):
     if len(letters) < len(re.sub(r"\s", "", t)) * 0.5: return True       # בעיקר ספרות וסימנים
     if re.search("([A-Za-zא-ת])\\1{3,}", t): return True                 # אותה אות 4 פעמים ברצף
     words = re.findall("[A-Za-zא-ת]{2,}", t)
-    bad = sum(1 for w in words if _FINAL_MID.search(w) or _CONSONANTS.search(w) or (len(w) >= 8 and len(set(w)) <= 3))
+    bad = sum(1 for w in words if _mash(w))
     return bad > 0 and bad >= len(words) * 0.3
+
+_ROWS = ("קראטוןםפ", "שדגכעיחלךף", "זסבהנמצתץ", "qwertyuiop", "asdfghjkl", "zxcvbnm")       # שורות המקלדת, בעברית ובאנגלית
+_WALKS = {r[i:i + 5] for row in _ROWS for r in (row, row[::-1]) for i in range(len(r) - 4)}   # 5 מקשים צמודים ברצף
+def _mash(w):
+    """מילה אחת שנראית כמו הקשה אקראית על המקלדת."""
+    lw = w.lower()
+    return bool(_FINAL_MID.search(w) or _CONSONANTS.search(w) or (len(w) >= 8 and len(set(w)) <= 3)
+                or any(lw[i:i + 5] in _WALKS for i in range(len(lw) - 4))
+                or (len(w) >= 3 and w[-1] in "מנצ" and w not in ("בעמ", "מעמ"))       # בעברית תקינה מילה לא נגמרת במ/נ/צ רגילות
+                or (len(w) >= 6 and set(w) <= set("שדגכעיחלךף")))                    # מילה ארוכה רק משורת האמצע של המקלדת
 
 def validate_job(f):
     err = []
@@ -1144,7 +1154,7 @@ T["base"] = """<!doctype html><html lang="{{ 'en' if lang=='en' else 'he' }}" di
 {% for m in get_flashed_messages() %}<div class="flash">{{m|tr}}</div>{% endfor %}
 <main id="mn">{% block c %}{% endblock %}</main>
 <footer><nav><a href="/jobs">חיפוש עבודה</a><a href="/employers">למעסיקים</a><a href="/faq">שאלות נפוצות</a><a href="/terms">תנאי שימוש</a><a href="/privacy">מדיניות פרטיות</a><a href="/support">תמיכה ויצירת קשר</a></nav>
-{{BRAND}} © · גרסה 2.3 · אנו פועלים לפי חוק עבודת הנוער, התשי"ג-1953 · נתקלתם במשרה חשודה? דווחו עליה בדף המשרה.</footer>
+{{BRAND}} © · גרסה 3.1 · אנו פועלים לפי חוק עבודת הנוער, התשי"ג-1953 · נתקלתם במשרה חשודה? דווחו עליה בדף המשרה.</footer>
 <nav class="tabbar"><a href="/"><svg class="i"><use href="#i-home"/></svg>בית</a><a href="/jobs"><svg class="i"><use href="#i-search"/></svg>חיפוש</a><a href="{{ '/me' if me else '/login' }}"><svg class="i"><use href="#i-heart"/></svg>שמורות</a><a href="{{ '/me' if me else '/login' }}"><svg class="i"><use href="#i-user"/></svg>החשבון</a></nav>
 <script>const $=s=>document.querySelector(s);
 requestAnimationFrame(()=>{const l=$('#ld');if(l){l.classList.add('x');setTimeout(()=>l.remove(),500)}});setTimeout(()=>$('#ld')&&$('#ld').classList.add('x'),2500);
@@ -1398,7 +1408,7 @@ TeenJobs – עבודות לבני נוער בישראל. מעסיקים מאו�
 תנאי שימוש => Terms of use
 מדיניות פרטיות => Privacy policy
 תמיכה ויצירת קשר => Support & contact
-© · גרסה 2.3 · אנו פועלים לפי חוק עבודת הנוער, התשי"ג-1953 · נתקלתם במשרה חשודה? דווחו עליה בדף המשרה. => © · Version 2.3 · We follow the Youth Employment Law, 1953 · Found a suspicious job? Report it on the job page.
+© · גרסה 3.1 · אנו פועלים לפי חוק עבודת הנוער, התשי"ג-1953 · נתקלתם במשרה חשודה? דווחו עליה בדף המשרה. => © · Version 3.1 · We follow the Youth Employment Law, 1953 · Found a suspicious job? Report it on the job page.
 בית => Home
 חיפוש => Search
 שמורות => Saved
