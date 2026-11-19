@@ -51,8 +51,8 @@ def price_now(): return PRICE if launch_on() else LIST_PRICE
 if PG:
     import psycopg2, psycopg2.extras
 MIN_WAGE = 34.3           # שכר מינימום לשעה (בדקו ועדכנו לפי החוק העדכני)
-CITIES = ["תל אביב-יפו", "ירושלים", "חיפה", "ראשון לציון", "פתח תקווה", "אשדוד", "נתניה",
-          "באר שבע", "בני ברק", "רמת גן", "הרצליה", "רעננה", "כפר סבא", "מודיעין", "אור יהודה", "אחר"]
+CITY_TOP = ['תל אביב-יפו', 'ירושלים', 'חיפה', 'ראשון לציון', 'פתח תקווה', 'אשדוד', 'נתניה', 'באר שבע', 'בני ברק', 'רמת גן', 'הרצליה', 'רעננה', 'כפר סבא', 'מודיעין', 'אור יהודה']      # הערים הגדולות: מוצגות בדף הבית
+CITIES = CITY_TOP + ['אבן יהודה', 'אום אל-פחם', 'אופקים', 'אור עקיבא', 'אילת', 'אלעד', 'אריאל', 'אשקלון', 'באקה אל-גרבייה', 'באר יעקב', 'בית שאן', 'בית שמש', 'ביתר עילית', 'בת ים', 'גבעת שמואל', 'גבעתיים', 'גדרה', 'גני תקווה', 'דימונה', 'הוד השרון', 'זכרון יעקב', 'חדרה', 'חולון', 'טבריה', 'טייבה', 'טירה', 'טירת כרמל', 'טמרה', 'יבנה', 'יהוד-מונוסון', 'יקנעם', 'ירוחם', 'כפר יונה', 'כפר קאסם', 'כרמיאל', 'להבים', 'לוד', 'מגדל העמק', 'מודיעין עילית', 'מיתר', 'מעלה אדומים', 'מעלות-תרשיחא', 'מצפה רמון', 'נהריה', 'נוף הגליל', 'נס ציונה', 'נצרת', 'נשר', 'נתיבות', "סח'נין", 'עומר', 'עכו', 'עפולה', 'ערד', 'פרדס חנה-כרכור', 'צפת', 'קדימה-צורן', 'קיסריה', 'קלנסווה', 'קצרין', 'קריית אונו', 'קריית אתא', 'קריית ביאליק', 'קריית גת', 'קריית ים', 'קריית מוצקין', 'קריית מלאכי', 'קריית שמונה', 'ראש העין', 'רהט', 'רחובות', 'רמלה', 'רמת השרון', 'שדרות', 'שוהם', 'שלומי', 'שפרעם', 'תל מונד'] + ['יישוב אחר בצפון', 'יישוב אחר במרכז', 'יישוב אחר באזור ירושלים', 'יישוב אחר בדרום']     # רשימה סגורה – אין הקלדה חופשית של עיר
 TYPES = ["בייביסיטר ועזרה לילדים", "דוג ווקר וטיפול בחיות", "שיעורים פרטיים (מתמטיקה, אנגלית...)",
          "הדרכה וחוגים", "קמעונאות וחנויות", "מסעדות וקפה – הגשה", "מטבח ופיצה", "שליחויות",
          "משרד ושירות לקוחות", "גינה ועבודות בית", "אירועים", "עבודות לחופשת הקיץ", "אחר"]
@@ -182,8 +182,54 @@ def sel(name, options, cur="", other="", first=None):
 def period_of(f):
     return f.get("wage_period") if f.get("wage_period") in ("hour", "month", "job") else "hour"
 
+def norm_phone(p):
+    """מספר טלפון ישראלי אמיתי בלבד. מחזיר '+9725XXXXXXXX' (או קווי/IP), או None אם המספר לא תקין.
+    נייד: 5X ועוד 7 ספרות · קווי: 2/3/4/8/9 ועוד 7 ספרות · IP: 72–79 ועוד 7 ספרות."""
+    d = re.sub(r"\D", "", p or "")
+    if d.startswith("972"): d = d[3:]
+    if d.startswith("0"): d = d[1:]
+    if not (re.fullmatch(r"5[0-689]\d{7}", d) or re.fullmatch(r"[23489]\d{7}", d) or re.fullmatch(r"7[2-9]\d{7}", d)): return None
+    sub = d[-7:]
+    if len(set(sub)) < 3 or sub in "01234567890" or sub in "09876543210": return None     # 0000000, 1111222, 1234567 וכדומה
+    return "+972" + d
+
 def phone_ok(p):
-    return not p or re.fullmatch(r"(\+972|0)[\d\- ]{8,12}", p)
+    return not (p or "").strip() or norm_phone(p) is not None
+
+def fmt_phone(p):
+    """+972501234567 → 050-123-4567 (לתצוגה)."""
+    n = norm_phone(p)
+    if not n: return p or ""
+    d = "0" + n[4:]
+    return f"{d[:3]}-{d[3:6]}-{d[6:]}" if len(d) == 10 else f"{d[:2]}-{d[2:5]}-{d[5:]}"
+
+NAME_RX = re.compile(r"[A-Za-z\u0590-\u05FF][A-Za-z\u0590-\u05FF'\"׳״\- ]{0,38}[A-Za-z\u0590-\u05FF'׳.]")
+def name_ok(n):
+    """שם או כינוי: אותיות בעברית/אנגלית (ורווח, מקף, גרש), 2–40 תווים, ולא הקלדה אקראית."""
+    n = " ".join((n or "").split())
+    return bool(NAME_RX.fullmatch(n)) and not junk(n, 2)
+
+def text_ok(t, min_letters=3):
+    """טקסט חופשי לא חובה: ריק זה בסדר, אחרת חייב להיראות כמו מילים אמיתיות."""
+    t = (t or "").strip()
+    return not t or not junk(t, min_letters)
+
+def city_err(f):
+    return None if f.get("city") in CITIES else "יש לבחור עיר מהרשימה. אם העיר לא ברשימה, בחרו \"יישוב אחר\" באזור שלכם."
+
+def title_ok(t):
+    """שם משרה / סוג עבודה: לא הקלדה אקראית, ומילה בודדת חייבת להיות מילה מוכרת (למשל 'בייביסיטר')."""
+    t = " ".join((t or "").split())
+    if junk(t, 3): return False
+    words = re.findall("[A-Za-z]{2,}|[א-ת]{2,}", t)
+    if len(words) == 1 and words[0].lower() not in _lm()["known"]: return False
+    return bool(words)
+
+def other_err(f, name, label):
+    """בבחירת "אחר" חייבים לכתוב ערך אמיתי."""
+    if f.get(name) == OTHER and not title_ok(f.get(name + "_other", "")):
+        return f"כתבו {label} אמיתי/ת בשדה \"אחר\" (בלי צירופי אותיות אקראיים)."
+    return None
 
 _FINAL_MID = re.compile("[ךםןףץ](?=[א-ת])")          # אות סופית באמצע מילה – סימן מובהק להקלדה אקראית
 _CONSONANTS = re.compile("[b-df-hj-np-tv-xzB-DF-HJ-NP-TV-XZ]{6,}")
@@ -262,11 +308,19 @@ def validate_job(f):
     elif f.get("wage_period") == "job":
         if wage < floor * hrs: err.append(f"השכר לעבודה נמוך מהמינימום החוקי לשעות שהוגדרו (כ-{round(floor * hrs)} ₪).")
     elif wage < floor: err.append(f"השכר נמוך מהמינימום החוקי לגיל זה (כ-{floor} ₪ לשעה).")
-    if not phone_ok(f.get("phone", "").strip()): err.append("מספר הטלפון אינו תקין (למשל 050-1234567).")
+    if wage <= 0: err.append("השכר חייב להיות מספר חיובי.")
+    elif wage > {"month": 30000, "job": 5000}.get(f.get("wage_period"), 300):
+        err.append("השכר שהוזן גבוה בצורה לא סבירה. בדקו שלא נוספו ספרות בטעות.")
+    if not phone_ok(f.get("phone", "")): err.append("מספר הטלפון אינו מספר ישראלי תקין. כתבו נייד כמו 50-123-4567 (אחרי ה-972+).")
+    for e2 in (city_err(f), other_err(f, "jtype", "סוג עבודה")):
+        if e2: err.append(e2)
+    if not text_ok(f.get("requirements", "")): err.append("הדרישות אינן ברורות. כתבו במילים פשוטות, או השאירו ריק.")
+    ad = " ".join(f.get("address", "").split())
+    if ad and (junk(re.sub(r"\d+", " ", ad), 2) or not re.search("[A-Za-zא-ת]{2,}", ad)): err.append("הכתובת אינה ברורה. כתבו רחוב ומספר, למשל: הרצל 12.")
     if len(f.get("description", "").strip()) < 20: err.append("יש לכתוב תיאור משרה של לפחות 20 תווים.")
     elif junk(f.get("description", ""), 15) or len(f.get("description", "").split()) < 4:
         err.append("תיאור המשרה אינו ברור. תארו במילים פשוטות מה עושים בעבודה.")
-    if junk(f.get("title", ""), 3): err.append("שם המשרה אינו ברור. כתבו שם אמיתי, למשל: בייביסיטר לשני ילדים.")
+    if not title_ok(f.get("title", "")): err.append("שם המשרה אינו ברור. כתבו שם אמיתי, למשל: בייביסיטר לשני ילדים.")
     return err
 
 # ===================== עזרים =====================
@@ -324,7 +378,7 @@ def inject():
     adm = is_admin()
     ast = dict(pend=q("SELECT COUNT(*) c FROM jobs WHERE approved=0", one=True)["c"],
                reps=q("SELECT COUNT(DISTINCT job_id) c FROM reports", one=True)["c"]) if adm else {}
-    return dict(me=me, favs=favs, is_admin=adm, ast=ast, BENTO=BENTO, TICON=TYPE_ICON, SUPPORT=SUPPORT_EMAIL, mode=session.get("mode"), BRAND=BRAND, GSV=GSV, CITY_URL=CITY_URL, TYPE_URL=TYPE_URL,lang=session.get("lang", "he"), TMA=TYPE_MIN_AGE, CITIES=CITIES, TYPES=TYPES, DURS=DURS,
+    return dict(me=me, favs=favs, is_admin=adm, ast=ast, BENTO=BENTO, PAYPAL_LIVE=PAYPAL_LIVE, TICON=TYPE_ICON, CITY_TOP=CITY_TOP, SUPPORT=SUPPORT_EMAIL, mode=session.get("mode"), BRAND=BRAND, GSV=GSV, CITY_URL=CITY_URL, TYPE_URL=TYPE_URL,lang=session.get("lang", "he"), TMA=TYPE_MIN_AGE, CITIES=CITIES, TYPES=TYPES, DURS=DURS,
                 STATUSES=STATUSES, CSS=CSS, wage_floor=wage_floor, sel=sel, FREQ=FREQ, DAYS=DAYS, OTHER=OTHER,
                 stars=lambda v: "★" * round(v or 0) + "☆" * (5 - round(v or 0)))
 
@@ -339,7 +393,7 @@ SEO = {"home": ("עבודות לבני נוער בישראל", SEO_DESC),
 LEGAL_T = {"terms": "תנאי שימוש", "privacy": "מדיניות פרטיות", "support": "תמיכה ויצירת קשר"}
 PRIVATE = {"/me", "/employer", "/choose", "/verify", "/account", "/admin", "/qr", "/login", "/register", "/forgot"}   # דפים שלא אמורים להופיע בגוגל
 # דפי נחיתה: כתובת נקייה לכל עיר ולכל תחום, למשל /jobs/city/תל-אביב-יפו
-CITY_SLUG = {c.replace(" ", "-"): c for c in CITIES if c != "אחר"}
+CITY_SLUG = {c.replace(" ", "-"): c for c in CITIES if c != "אחר" and not c.startswith("יישוב אחר")}
 TYPE_SLUG = dict(zip(["בייביסיטר", "דוג-ווקר", "שיעורים-פרטיים", "הדרכה-וחוגים", "חנויות", "מסעדות-וקפה", "מטבח-ופיצה",
                       "שליחויות", "משרד-ושירות-לקוחות", "גינה-ועבודות-בית", "אירועים", "עבודות-קיץ"], TYPES))
 CITY_URL = {c: "/jobs/city/" + s for s, c in CITY_SLUG.items()}
@@ -372,6 +426,12 @@ def tr(s):
     if session.get("lang") != "en" or not isinstance(s, str): return s
     return EX.get(s) or en(s)
 
+@app.template_filter("phone")
+def phone_f(p): return fmt_phone(p)
+
+@app.template_filter("tel")
+def tel_f(p): return norm_phone(p) or re.sub(r"[^\d+]", "", p or "")
+
 @app.template_filter("days")
 def days_f(s):
     """'א, ג' → "א', ג'" בעברית או "Sun, Tue" באנגלית. טקסט ישן שאינו רשימת ימים מוצג כמו שהוא."""
@@ -395,7 +455,7 @@ def _csrf():                       # הגנת CSRF לכל טופס POST
 def _headers(r):                   # כותרות אבטחה
     r.headers["X-Content-Type-Options"] = "nosniff"
     r.headers["Referrer-Policy"] = "same-origin"
-    pp = " https://*.paypal.com https://*.paypalobjects.com" if request.path == "/employer/pay" else ""     # PayPal נטען רק בדף התשלום
+    pp = " https://*.paypal.com https://*.paypalobjects.com" if request.path in ("/employer/pay", "/admin/pay-preview") else ""     # PayPal נטען רק בדף התשלום
     r.headers["Content-Security-Policy"] = ("default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         f"font-src https://fonts.gstatic.com; script-src 'self' 'unsafe-inline'{pp}; img-src 'self' data:{pp}; connect-src 'self'{pp}; "
         f"frame-src 'self'{pp}; frame-ancestors 'self'")
@@ -739,6 +799,7 @@ def register():
         f = request.form; email = f["email"].strip().lower()
         if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email): flash("כתובת האימייל אינה תקינה.")
         elif len(f["pw"]) < 8: flash("הסיסמה חייבת להכיל לפחות 8 תווים.")
+        elif not name_ok(f.get("name", "")): flash("השם אינו תקין. כתבו שם או כינוי אמיתי באותיות (2–40 תווים).")
         elif q("SELECT 1 FROM users WHERE email=?", (email,), True): flash("האימייל כבר רשום – נסו להתחבר.")
         else:
             uid = ex("INSERT INTO users(email,pw,name) VALUES(?,?,?)", (email, generate_password_hash(f["pw"]), f["name"].strip()[:40]))
@@ -870,6 +931,11 @@ def me_page():
         f = request.form
         try: age = int(f["age"]); assert 14 <= age <= 21
         except Exception: flash("האתר מיועד לגילאי 14–21."); return redirect("/me")
+        if not name_ok(f.get("name", "")): flash("השם אינו תקין. כתבו שם או כינוי אמיתי באותיות (2–40 תווים)."); return redirect("/me#edit")
+        e2 = city_err(f)
+        if e2: flash(e2); return redirect("/me#edit")
+        for k, lbl in (("skills", "הכישורים"), ("experience", "הניסיון"), ("bio", "קצת עליי")):
+            if not text_ok(f.get(k, ""), 2): flash(f"השדה \"{lbl}\" אינו ברור. כתבו במילים פשוטות, או השאירו ריק."); return redirect("/me#edit")
         ex("UPDATE users SET name=?,age=?,city=?,skills=?,experience=?,bio=? WHERE id=?",
            (f["name"][:40], age, pick(f, "city", CITIES), f["skills"][:300], f["experience"][:1000], f["bio"][:1000], uid))
         flash("הפרופיל נשמר ")
@@ -922,6 +988,8 @@ def apply(jid):
     u = q("SELECT * FROM users WHERE id=?", (session["uid"],), True)
     j = q("SELECT * FROM jobs WHERE id=? AND active=1 AND approved=1", (jid,), True) or abort(404)
     if not u["age"]: flash("כדי להגיש מועמדות יש להשלים גיל בפרופיל."); return redirect("/me")
+    if not text_ok(request.form.get("message", ""), 2):
+        flash("ההודעה למעסיק אינה ברורה. כתבו כמה מילים, או השאירו ריק."); return redirect(f"/job/{jid}")
     if u["age"] < j["min_age"]: flash(f"המשרה מיועדת מגיל {j['min_age']}.")
     elif q("SELECT 1 FROM apps WHERE user_id=? AND job_id=?", (u["id"], jid), True): flash("כבר הגשת מועמדות למשרה הזו.")
     else:
@@ -938,6 +1006,8 @@ def rate(jid):
     j = q("SELECT * FROM jobs WHERE id=?", (jid,), True) or abort(404)
     if j["employer_id"] == session["uid"]: flash("אי אפשר לדרג משרה של עצמך.")
     else:
+        if not text_ok(request.form.get("comment", ""), 2):
+            flash("התגובה אינה ברורה. כתבו כמה מילים, או השאירו ריק."); return redirect(f"/job/{jid}")
         st = request.form.get("stars", "5"); s = min(5, max(1, int(st))) if st.isdigit() else 5
         ex("INSERT INTO ratings(user_id,job_id,stars,comment) VALUES(?,?,?,?) ON CONFLICT(user_id,job_id) DO UPDATE SET stars=excluded.stars, comment=excluded.comment",
            (session["uid"], jid, s, request.form.get("comment", "")[:500]))
@@ -1058,6 +1128,13 @@ def pay_page():
     return render_template("pay", emp=emp, price=price_now(), list_price=LIST_PRICE, launch=launch_on(), until=LAUNCH_UNTIL,
                            client_id=PAYPAL_CLIENT_ID, pend=pend, title="תשלום על פרסום העסק")
 
+@app.route("/admin/pay-preview")
+@need_admin
+def pay_preview():
+    """המנהל פטור מתשלום, אז כאן הוא רואה בדיוק את מה שעסק חדש רואה."""
+    return render_template("pay", emp={"business": L("העסק לדוגמה", "Sample business")}, price=price_now(), list_price=LIST_PRICE,
+                           launch=launch_on(), until=LAUNCH_UNTIL, client_id=PAYPAL_CLIENT_ID, pend=None, preview=True, title="תצוגה מקדימה – דף התשלום")
+
 @app.route("/pay/create", methods=["POST"])
 @need("employer")
 def pay_create():
@@ -1138,6 +1215,8 @@ def employer():
     if request.method == "POST":
         f = request.form
         reg = f.get("reg_no", "").strip(); about = f.get("about", "").strip()
+        e2 = city_err(f)
+        if e2: flash(e2); return redirect("/employer")
         if junk(f.get("business", ""), 2):
             flash("שם העסק אינו ברור. כתבו את השם האמיתי של העסק או של העבודה."); return redirect("/employer")
         if about and junk(about, 2):
@@ -1176,7 +1255,7 @@ def job_form(jid):
             return render_template("jobform", j=f, jid=jid, sel_days=f.getlist("day"))
         v = (f["title"][:80], pick(f, "city", CITIES), pick(f, "jtype", TYPES), float(f["wage"]), int(f["min_age"]), int(f["start_h"]),
              int(f["end_h"]), days_of(f), f["duration"] if f.get("duration") in DURS else DURS[0], int(bool(f.get("no_exp"))), int(bool(f.get("weekend"))),
-             f["description"][:3000], f["requirements"][:2000], period_of(f), dpw_of(f), f.get("phone", "").strip()[:20],
+             f["description"][:3000], f["requirements"][:2000], period_of(f), dpw_of(f), norm_phone(f.get("phone", "")) or "",
              " ".join(f.get("address", "").split())[:80])
         cols = "title=?,city=?,jtype=?,wage=?,min_age=?,start_h=?,end_h=?,days=?,duration=?,no_exp=?,weekend=?,description=?,requirements=?,wage_period=?,days_per_week=?,phone=?,address=?,approved=0"
         if jid: ex(f"UPDATE jobs SET {cols} WHERE id=?", v + (jid,)); jx = jid
@@ -1455,17 +1534,61 @@ details.edit>summary h2::after{content:"✎";font-size:1rem;width:36px;height:36
 .payw{display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start;margin-top:10px}.pricec{background:var(--n);color:#10152B}.pricec .mut{color:#2a3150}.pricec h1{font-size:clamp(1.7rem,3.6vw,2.4rem)}
 .pr-big{display:flex;align-items:baseline;gap:14px;margin:6px 0 10px}.pr-big b{font-size:clamp(3rem,8vw,4.6rem);font-weight:900;line-height:1}.was{font-size:1.5rem;font-weight:800;opacity:.6;text-decoration-thickness:3px}
 .perks{list-style:none;padding:0;margin:16px 0 0;display:grid;gap:8px}.perks li{display:flex;gap:8px;align-items:center;font-weight:700;background:#fff;border:2px solid #10152B;border-radius:10px;padding:8px 12px}
+.ppfake{display:grid;gap:10px;margin:16px 0}.ppfake span{display:grid;place-items:center;height:48px;border-radius:6px;font-weight:800}.ppy{background:#ffc439;color:#003087;font-style:italic;font-size:1.2rem}.ppc{background:#2c2e2f;color:#fff}
 .agree{display:flex;gap:10px;align-items:center;font-weight:700;margin:16px 0;cursor:pointer}.agree input{width:20px;height:20px}#ppb{min-height:120px}
 .pmsg{margin:10px 0 0;font-weight:800}.pmsg.on{background:#ffe9a8;color:#5c4100;border:2px solid #10152B;border-radius:10px;padding:10px 12px}
 .paybar{display:flex;gap:16px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-top:20px;padding:18px 22px;background:#ffe9a8;color:#10152B;border:var(--bw) solid var(--line);border-radius:18px;box-shadow:var(--sh)}.paybar s{opacity:.6}
 @media(max-width:900px){.payw{grid-template-columns:minmax(0,1fr)}}
+/* ===== 5.1 – פלטה חמה ומזמינה: שמנת, אבטיח, שמש, מנטה ותכלת ===== */
+:root{--bg:#FFF7EE;--v:#FF5C7A;--b:#4C8DFF;--b2:#2F6FE0;--n:#FFC93C;--mint:#2ED3A0;--peach:#FFB38A;--lilac:#C9B6FF;--ink:#1A1530;--line:#1A1530;--mut:#5b5470;--soft:#f1e2d2;--lv:#FFF0E0;--bl:#e6f0ff;--pl:#ffe3ea}
+[data-theme=dark]{--bg:#140f26;--sf:#211a3a;--ink:#FFF4E8;--line:#FFF4E8;--mut:#cdc4e0;--soft:#3a3058;--lv:#2b2148;--bl:#1f2a52;--pl:#3a1f36}
+body{background-image:radial-gradient(color-mix(in srgb,var(--ink) 10%,transparent) 1.2px,transparent 1.2px)}
+::selection{background:var(--v);color:#1A1530}
+.btn,.chk input:checked+span,select option:checked{color:#1A1530}.btn.dark{color:#fff}
+.btn{background:var(--v)}.btn.neon{background:var(--n)}.btn.danger{background:#ff8a6b}
+input:focus,select:focus,textarea:focus{box-shadow:4px 4px 0 var(--n)}
+.links a:hover,.nav-r>a:not(.btn):not(.ib):hover,.ib:hover,.chips a:hover,.tile:hover,.menu a:hover,.menu .out:hover,footer nav a:hover,.tabbar a:hover{background:var(--n);color:#1A1530}
+.nav{background:color-mix(in srgb,var(--sf) 92%,transparent);backdrop-filter:blur(10px)}
+/* מסך פתיחה עם זוהר צבעוני */
+html,body{overflow-x:clip}.hz{position:relative;isolation:isolate}
+.hz::before{content:"";position:absolute;z-index:-1;inset:-30px -40px -10px;background:radial-gradient(460px 320px at 82% 18%,#FFC93C80,transparent 70%),radial-gradient(520px 360px at 12% 32%,#FF5C7A4d,transparent 70%),radial-gradient(420px 300px at 50% 100%,#4C8DFF3d,transparent 70%),radial-gradient(300px 220px at 95% 85%,#2ED3A04d,transparent 70%);filter:blur(8px);animation:mesh 14s ease-in-out infinite alternate;pointer-events:none}
+@keyframes mesh{to{transform:translate(24px,-14px) scale(1.06)}}
+.hz h1 .u::after{background:var(--v)}.hz mark{background:var(--n)}
+.sticker .i{color:var(--v)}.checks .i{color:var(--v)}.checks li{background:color-mix(in srgb,var(--sf) 70%,transparent)}
+.bento{position:relative}
+.seal{position:absolute;z-index:3;inset-inline-start:-26px;top:-30px;width:104px;height:104px;border-radius:50%;background:var(--mint);color:#1A1530;border:var(--bw) solid #1A1530;box-shadow:4px 4px 0 #1A1530;display:grid;place-items:center;text-align:center;font-weight:900;line-height:1.05;font-size:.9rem;animation:seal 16s linear infinite}
+.seal b{display:block;font-size:1.45rem}@keyframes seal{to{rotate:360deg}}
+.b1{background:var(--v);color:#1A1530}.b1 .deco{border-color:#1A153055}.b2{background:var(--n)}.b3{background:var(--mint)}.b4{background:var(--b);color:#1A1530}.b5{background:#1A1530;color:#FFF7EE}.b5 .bi{background:var(--n)}
+.bx:hover .arr{background:#1A1530;color:var(--n)}
+[data-theme=dark] .b5{background:#2b2148}
+.tape{background:#1A1530;color:var(--n)}.tk span::after{color:var(--v)}
+.kpi:nth-child(5n+1){background:var(--n);color:#1A1530}.kpi:nth-child(5n+2){background:var(--v);color:#1A1530}.kpi:nth-child(5n+3){background:var(--mint);color:#1A1530}.kpi:nth-child(5n+4){background:var(--b);color:#1A1530}.kpi:nth-child(5n){background:var(--lilac);color:#1A1530}
+.adm .kpi:nth-child(5n+2),.adm .kpi:nth-child(5n+4){color:#1A1530}
+.fi{background:var(--pl);color:#d6294f}.tile:nth-child(4n+2) .fi{background:#fff1c7;color:#8a5a00}.tile:nth-child(4n+3) .fi{background:#d9f7ec;color:#0d7a58}.tile:nth-child(4n) .fi{background:var(--bl);color:var(--b2)}
+.step .fi{background:var(--pl)}.step:nth-child(2){background:var(--n)}.step:nth-child(3){background:var(--lv)}
+.band{background:linear-gradient(120deg,var(--v),#ff8a6b 55%,var(--n));color:#1A1530}.band .btn{background:#1A1530;color:#fff}
+.job:nth-child(3n+1) .ava{background:var(--n)}.job:nth-child(3n+2) .ava{background:var(--v);color:#1A1530}.job:nth-child(3n) .ava{background:var(--mint)}
+.go{background:var(--n)}.wage{color:var(--ink)}.heart.on{background:var(--v);color:#1A1530}
+.dh{background:linear-gradient(120deg,var(--v),#ff8a6b 60%,var(--n));color:#1A1530}.dh h1{color:#1A1530}.dh p{opacity:1}
+.hello{background:linear-gradient(120deg,var(--n),#ffe08a 60%,var(--mint))}
+.st.hl{background:var(--n)}.st .i{color:var(--v)}.steps5 i.on{background:var(--v)}.steps5 i:nth-child(4).on{background:var(--mint)}
+.dte{background:var(--n)}.earnc{box-shadow:5px 5px 0 var(--v)}.earnc .big{color:var(--n)}.eb i{background:linear-gradient(90deg,var(--n),var(--v))}
+.rg{background:conic-gradient(var(--v) calc(var(--p)*1%),var(--soft) 0)}
+.pricec{background:linear-gradient(150deg,var(--n),#ffe08a)}.flash{background:var(--n)}
+.adminbar{background:#1A1530}.adminbar b{color:var(--n)}.adminbar a{background:var(--n);border-color:var(--n)}
+.crown,.menu a.adm-l{background:var(--n);color:#1A1530}
+.big .card:nth-child(1){background:var(--n)}.big .card:nth-child(2){background:var(--mint);color:#1A1530}.big .card:nth-child(3){background:var(--v);color:#1A1530}
+.telw{display:flex;align-items:stretch;border:var(--bw) solid var(--line);border-radius:12px;background:var(--sf);overflow:hidden;transition:.12s}.telw:focus-within{box-shadow:4px 4px 0 var(--n)}
+.telw .cc{display:flex;align-items:center;gap:7px;padding:0 12px;background:var(--lv);border-inline-end:2px solid var(--line);font-weight:800;white-space:nowrap}.telw input{border:0;border-radius:0;box-shadow:none!important;letter-spacing:.04em}
+.il{width:24px;height:17px;border-radius:3px;box-shadow:0 0 0 1px #0002}#phh.bad{color:#c81e3a;font-weight:700}
+@media(max-width:760px){.seal{width:84px;height:84px;inset-inline-start:-6px;top:-24px;font-size:.78rem}.seal b{font-size:1.2rem}}
 @view-transition{navigation:auto}
 """
 
 # ===================== תבניות =====================
 T = {}
 T["auth"] = """{% extends 'base' %}{% block c %}<div class="card narrow"><h1>{{ 'הרשמה' if reg else 'התחברות' }}</h1>
-<form class="f" method="post">{% if reg %}<div><label>שם (או כינוי – לא חובה שם מלא)</label><input name="name" required></div>{% endif %}
+<form class="f" method="post">{% if reg %}<div><label>שם (או כינוי – לא חובה שם מלא)</label><input name="name" required minlength="2" maxlength="40" pattern="[A-Za-z\u0590-\u05FF][A-Za-z\u0590-\u05FF'׳\\- ]*[A-Za-z\u0590-\u05FF'׳.]" title="אותיות בלבד, 2–40 תווים"></div>{% endif %}
 <div><label>אימייל</label><input type="email" name="email" required></div><div><label>סיסמה</label><input type="password" name="pw" required></div>
 <button class="btn">{{ 'יצירת חשבון' if reg else 'כניסה' }}</button></form>
 <p class="mut">{% if reg %}יש כבר חשבון? <a href="/login"><u>התחברות</u></a>{% else %}חדשים כאן? <a href="/register"><u>הרשמה</u></a> · <a href="/forgot"><u>שכחתי סיסמה</u></a>{% endif %}</p></div>{% endblock %}"""
@@ -1504,8 +1627,8 @@ T["me"] = """{% extends 'base' %}{% block c %}
 {% if earn %}<div class="eb">{% for e in earn %}<div><span><b>{{e.title}}</b><span>₪ {{ '{:,}'.format(e.m) }}</span></span><i style="width:{{ (100*e.m/top)|round|int }}%"></i></div>{% endfor %}</div>{% else %}<small>עוד אין עבודות פעילות.</small>{% endif %}</div></aside></div>
 <h2>משרות שמורות</h2>{% if favs %}<div class="grid">{% for j in favs %}{% include 'card' %}{% endfor %}</div>{% else %}<div class="card empty">אין עדיין משרות שמורות. לוחצים על הלב בכרטיס משרה כדי לשמור.</div>{% endif %}
 <details class="edit" id="edit" {{ 'open' if pct < 50 }}><summary><h2>עריכת הפרופיל</h2></summary>
-<form class="card f" method="post"><div class="grid"><div><label>שם / כינוי</label><input name="name" value="{{me.name or ''}}"></div>
-<div><label>גיל (14–21)</label><input type="number" name="age" value="{{me.age or ''}}" required></div>
+<form class="card f" method="post"><div class="grid"><div><label>שם / כינוי</label><input name="name" required minlength="2" maxlength="40" pattern="[A-Za-z\u0590-\u05FF][A-Za-z\u0590-\u05FF'׳\\- ]*[A-Za-z\u0590-\u05FF'׳.]" title="אותיות בלבד, 2–40 תווים" value="{{me.name or ''}}"></div>
+<div><label>גיל (14–21)</label><input type="number" name="age" min="14" max="21" step="1" value="{{me.age or ''}}" required></div>
 <div><label>עיר</label>{{ sel('city', CITIES, me.city) }}</div></div>
 <div><label>כישורים ותחומי עניין</label><input name="skills" value="{{me.skills or ''}}" placeholder="למשל: אנגלית, עבודה עם ילדים, מחשבים"></div>
 <div><label>ניסיון תעסוקתי (אם יש)</label><textarea name="experience">{{me.experience or ''}}</textarea></div>
@@ -1533,17 +1656,17 @@ T["emp"] = """{% extends 'base' %}{% block c %}
 T["jobform"] = """{% extends 'base' %}{% block c %}<h1>{{ 'עריכת משרה' if jid else 'פרסום משרה חדשה' }}</h1>
 <div class="flash"> לפי חוק עבודת הנוער: מגיל 14, עד 8 שעות ביום, עד גיל 16 לא בין 20:00–06:00, ועד 18 לא בין 22:00–06:00, שכר לא נמוך מהמינימום לגיל, ובעבודות מסוכנות (כמו מטבח ושליחויות) הגיל המינימלי באתר גבוה יותר.</div>
 <form class="card f" method="post"><div class="grid">
-<div><label>שם המשרה</label><input name="title" required value="{{j.title}}"></div>
+<div><label>שם המשרה</label><input name="title" required minlength="3" maxlength="80" value="{{j.title}}"></div>
 <div><label>עיר</label>{{ sel('city', CITIES, j.city, j.city_other) }}</div>
 <div><label>סוג עבודה</label>{{ sel('jtype', TYPES, j.jtype, j.jtype_other) }}</div>
-<div><label>שכר (₪)</label><input type="number" step="0.1" name="wage" required value="{{j.wage}}"></div>
+<div><label>שכר (₪)</label><input type="number" step="0.1" min="1" max="30000" inputmode="decimal" name="wage" required value="{{j.wage}}"></div>
 <div><label>תשלום לפי</label><select name="wage_period"><option value="hour" {{'selected' if j.wage_period!='month'}}>שעה</option><option value="month" {{'selected' if j.wage_period=='month'}}>חודש</option><option value="job" {{'selected' if j.wage_period=='job'}}>עבודה (סכום כולל)</option></select></div>
-<div><label>טלפון ליצירת קשר (אופציונלי)</label><input type="tel" name="phone" maxlength="20" dir="ltr" placeholder="050-1234567" value="{{j.phone or ''}}"></div>
+<div><label for="ph">טלפון ליצירת קשר (אופציונלי)</label><div class="telw" dir="ltr"><span class="cc"><svg class="il" viewBox="0 0 22 16" aria-hidden="true"><rect width="22" height="16" rx="2" fill="#fff"/><rect y="2" width="22" height="2.2" fill="#0038b8"/><rect y="11.8" width="22" height="2.2" fill="#0038b8"/><path d="M11 4.6 13.9 9.6H8.1zM11 11.4 8.1 6.4h5.8z" fill="none" stroke="#0038b8" stroke-width=".9"/></svg> +972</span><input id="ph" type="tel" name="phone" inputmode="numeric" autocomplete="tel-national" maxlength="13" placeholder="50-123-4567" value="{{ (j.phone|phone)[1:] if j.phone and (j.phone|phone).startswith('0') else (j.phone or '') }}"></div><small class="mut" id="phh">מספר ישראלי בלבד: נייד (<bdi dir="ltr">50-123-4567</bdi>) או קווי (<bdi dir="ltr">3-123-4567</bdi>), בלי ה-0 בהתחלה.</small></div>
 <div><label>כתובת (אופציונלי)</label><input name="address" maxlength="80" placeholder="רחוב ומספר. לבית פרטי מספיק שם הרחוב" value="{{j.address or ''}}"></div>
 {% set dw = j.days_per_week if j.days_per_week is defined and j.days_per_week is not none else 3 %}<div><label>תדירות</label><select name="days_per_week">{% for k, v in FREQ.items() %}<option value="{{k}}" {{'selected' if dw|string == k|string}}>{{v|tr}}</option>{% endfor %}</select></div>
 <div><label>גיל מינימלי (14 עד 21)</label><input type="number" min="14" max="21" step="1" name="min_age" required value="{{j.min_age or 16}}"></div>
-<div><label>משעה</label><input type="number" min="0" max="23" name="start_h" required value="{{j.start_h or 16}}"></div>
-<div><label>עד שעה</label><input type="number" min="1" max="24" name="end_h" required value="{{j.end_h or 20}}"></div>
+<div><label>משעה</label><input type="number" min="0" max="23" step="1" name="start_h" required value="{{j.start_h or 16}}"></div>
+<div><label>עד שעה</label><input type="number" min="1" max="24" step="1" name="end_h" required value="{{j.end_h or 20}}"></div>
 <div><label>ימי עבודה</label><div class="days">{% for d in DAYS %}<label class="chk"><input type="checkbox" name="day" value="{{d}}" {{'checked' if d in sel_days}}><span>{{ d|days }}</span></label>{% endfor %}</div></div>
 <div><label>סוג משרה</label><select name="duration">{% for c in DURS %}<option {{'selected' if j.duration==c}} value="{{c}}">{{c|tr}}</option>{% endfor %}</select></div></div>
 <label><input type="checkbox" name="no_exp" {{'checked' if j.no_exp}}> מתאים ללא ניסיון</label>
@@ -1551,8 +1674,16 @@ T["jobform"] = """{% extends 'base' %}{% block c %}<h1>{{ 'עריכת משרה' 
 <div><label>תיאור המשרה</label><textarea name="description" required>{{j.description}}</textarea></div>
 <div><label>דרישות</label><textarea name="requirements">{{j.requirements}}</textarea></div>
 <small class="mut" id="ah"></small><button class="btn" style="justify-self:start">שמירה ופרסום</button></form>
-<script>const M={{ TMA|tojson }},t=document.querySelector('[name=jtype]'),a=document.querySelector('[name=min_age]');
-function f(){const m=M[t.value]||14;a.min=m;if(+a.value<m)a.value=m;document.getElementById('ah').textContent='גיל מינימלי לסוג עבודה זה: '+m}t.onchange=f;f()</script>{% endblock %}"""
+<script>(()=>{const M={{ TMA|tojson }},t=document.querySelector('[name=jtype]'),a=document.querySelector('[name=min_age]');
+function f(){const m=M[t.value]||14;a.min=m;if(+a.value<m)a.value=m;document.getElementById('ah').textContent='גיל מינימלי לסוג עבודה זה: '+m}t.onchange=f;f();
+const ph=document.getElementById('ph'),phh=document.getElementById('phh'),PH0=phh.textContent;
+function pok(v){let d=v.replace(/\\D/g,'');if(d.startsWith('972'))d=d.slice(3);if(d.startsWith('0'))d=d.slice(1);
+ if(!(/^5[0-689]\\d{7}$/.test(d)||/^[23489]\\d{7}$/.test(d)||/^7[2-9]\\d{7}$/.test(d)))return '';const s=d.slice(-7);if(new Set(s).size<3||'01234567890'.includes(s)||'09876543210'.includes(s))return '';return d}
+function pfmt(d){return d.length==9?d.slice(0,2)+'-'+d.slice(2,5)+'-'+d.slice(5):d.slice(0,1)+'-'+d.slice(1,4)+'-'+d.slice(4)}
+ph.addEventListener('input',()=>{ph.value=ph.value.replace(/[^\\d\\-]/g,'').slice(0,13);ph.setCustomValidity('');phh.textContent=PH0;phh.classList.remove('bad')});
+ph.addEventListener('blur',()=>{if(!ph.value.trim())return;const d=pok(ph.value);if(d){ph.value=pfmt(d)}else{ph.setCustomValidity('מספר לא תקין');phh.textContent='המספר לא נראה כמו מספר ישראלי אמיתי. דוגמה לנייד: 50-123-4567';phh.classList.add('bad')}});
+ph.form.addEventListener('submit',e=>{if(ph.value.trim()&&!pok(ph.value)){e.preventDefault();ph.focus();ph.reportValidity()}});
+const w=document.querySelector('[name=wage]');w.min='1';w.addEventListener('input',()=>{w.value=w.value.replace(/[^\\d.]/g,'')})})();</script>{% endblock %}"""
 
 T["applicants"] = """{% extends 'base' %}{% block c %}<h1>מועמדים – {{j.title}}</h1>
 {% for a in aps %}<div class="card" style="margin-bottom:10px"><div class="row"><b>{{a.name}} · גיל {{a.age}} · {{a.city|tr}}</b>
@@ -1566,6 +1697,7 @@ T["admin"] = """{% extends 'base' %}{% block c %}{% if not ok %}<div class="card
 {% else %}<section class="hello"><div><h1>שלום {{ me.name if me and me.name else 'אדמין' }}, מה שלומך? <span class="wave">👋</span></h1>
 <p>{% if stats.pend or stats.reps %}יש לך עבודה: {% if stats.pend %}{{stats.pend}} משרות מחכות לאישור{% endif %}{% if stats.pend and stats.reps %} ו-{% endif %}{% if stats.reps %}{{stats.reps}} משרות עם דיווחים{% endif %}.{% else %}הכול שקט באתר. אין משרות שמחכות לך ואין דיווחים פתוחים.{% endif %}</p></div>
 <span class="tag {{ 'g' if ai else 'o' }}">{{ 'Claude מחובר ובודק משרות' if ai else 'Claude לא מחובר (ANTHROPIC_API_KEY)' }}</span></section>
+{% if not pay_on %}<div class="paybar"><div><b>התשלום על פרסום עסק עדיין כבוי.</b><br><span>חסרים ב-Render המפתחות PAYPAL_CLIENT_ID ו-PAYPAL_SECRET. עד שתוסיף אותם, עסקים מפרסמים בחינם. (אתה כמנהל פטור מתשלום בכל מקרה, אז גם אז לא תראה את דף התשלום מהחשבון שלך.)</span></div><a class="btn" href="/admin/pay-preview">איך נראה דף התשלום</a></div>{% endif %}
 <div class="kpis adm"><a class="kpi" href="#pend"><b>{{stats.pend}}</b>ממתינות לאישור</a><a class="kpi" href="#reps"><b>{{stats.reps}}</b>משרות עם דיווחים</a><a class="kpi" href="#live"><b>{{stats.live}}</b>משרות באוויר</a><a class="kpi" href="#emps"><b>{{stats.emps}}</b>עסקים</a><div class="kpi"><b>{{stats.users}}</b>משתמשים</div></div>
 
 <h2 id="pend">ממתינות לאישור שלך</h2>{% for p in pend %}<div class="card adm-row"><div class="grow"><a href="/admin/job/{{p.id}}"><b><u>{{p.title}}</u></b></a> · {{p.business}} {% if not p.verified %}<span class="tag o">עסק לא מאומת</span>{% endif %} · {{p.city|tr}} · מגיל {{p.min_age}}
@@ -1589,7 +1721,7 @@ T["admin"] = """{% extends 'base' %}{% block c %}{% if not ok %}<div class="card
 {% else %}<div class="card empty">אין עסקים</div>{% endfor %}
 <h2 id="pays">תשלומים</h2>
 {% if not pay_on %}<div class="card"><b>התשלומים כבויים.</b> <span class="mut">כדי להפעיל, מוסיפים ב-Render את PAYPAL_CLIENT_ID ו-PAYPAL_SECRET (הסבר ב-README). עד אז עסקים יכולים לפרסם בחינם.</span></div>
-{% else %}<div class="card row" style="margin-bottom:12px"><span>מצב: <span class="tag {{ 'g' if pay_live else 'o' }}">{{ 'כסף אמיתי (live)' if pay_live else 'מצב בדיקה (sandbox)' }}</span> · מחיר נוכחי: <b>{{ '%.2f'|format(price) }} ₪</b></span><span>הכנסות: <b>{{ '%.2f'|format(income) }} ₪</b></span></div>{% endif %}
+{% else %}<div class="card row" style="margin-bottom:12px"><a class="btn sm white" href="/admin/pay-preview">תצוגה מקדימה של דף התשלום</a><span>מצב: <span class="tag {{ 'g' if pay_live else 'o' }}">{{ 'כסף אמיתי (live)' if pay_live else 'מצב בדיקה (sandbox)' }}</span> · מחיר נוכחי: <b>{{ '%.2f'|format(price) }} ₪</b></span><span>הכנסות: <b>{{ '%.2f'|format(income) }} ₪</b></span></div>{% endif %}
 {% for p in pays %}<div class="card adm-row"><div class="grow"><b>{{p.business or '—'}}</b> · <span dir="ltr" class="mut">{{p.email}}</span> · {{p.amount}} {{p.currency}}
 <span class="tag {{ 'g' if p.status=='COMPLETED' else 'o' if p.status in ('PENDING','SKIPPED') else 'p' }}">{{ {'COMPLETED':'שולם','PENDING':'ממתין','FAILED':'נכשל','MISMATCH':'לא תואם – לבדוק','SKIPPED':'בוטל (כבר שולם)'}.get(p.status, p.status) }}</span>
 <br><small class="mut" dir="ltr">order {{p.order_id}}{% if p.capture_id %} · capture {{p.capture_id}}{% endif %}{% if p.payer %} · {{p.payer}}{% endif %} · {{ (p.created|string)[:16] }}</small></div>
@@ -1610,7 +1742,7 @@ T["admin_job"] = """{% extends 'base' %}{% block c %}<a class="mut" href="/admin
 <button class="btn danger" name="act" value="delete_job" onclick="return confirm('למחוק את המשרה לגמרי?')">מחיקת המשרה</button></form></div>
 
 <h2>המעסיק</h2><div class="card"><b>{{j.business}}</b> <span class="tag {{ 'g' if j.verified else 'o' }}">{{'מאומת' if j.verified else 'לא מאומת'}}</span>{% if j.banned %}<span class="tag p">חסום</span>{% endif %}
-<p class="mut">אימייל: <span dir="ltr">{{j.email}}</span> · מספר עוסק: {{j.reg_no or 'לא צוין'}}{% if j.phone %} · טלפון: <span dir="ltr">{{j.phone}}</span>{% endif %}</p>
+<p class="mut">אימייל: <span dir="ltr">{{j.email}}</span> · מספר עוסק: {{j.reg_no or 'לא צוין'}}{% if j.phone %} · טלפון: <span dir="ltr">{{j.phone|phone}}</span>{% endif %}</p>
 {% if j.about %}<p>{{j.about}}</p>{% endif %}{% if j.eai %}<p class="mut sm">{{j.eai}}</p>{% endif %}
 {% if others %}<p class="sm">משרות נוספות של המעסיק: {% for o in others %}<a href="/admin/job/{{o.id}}"><u>{{o.title}}</u></a>{{ ', ' if not loop.last }}{% endfor %}</p>{% endif %}
 <form method="post" class="acts"><input type="hidden" name="id" value="{{j.employer_id}}">{% if not j.verified %}<button class="btn sm" name="act" value="verify">אימות העסק</button>{% else %}<button class="btn sm ghost" name="act" value="unverify">ביטול אימות</button>{% endif %}
@@ -1627,9 +1759,11 @@ T["pay"] = """{% extends 'base' %}{% block c %}<div class="payw">
 <div class="pr-big">{% if launch %}<s class="was">{{ '%.2f'|format(list_price) }} ₪</s>{% endif %}<b>{{ '%.2f'|format(price) }} ₪</b></div>
 <p class="sm"><b>תשלום חד-פעמי.</b> בלי מנוי ובלי חיובים חוזרים.{% if launch %} מחיר ההשקה בתוקף עד {{ until.strftime('%d/%m/%Y') }}, ואחר כך המחיר יהיה {{ '%.2f'|format(list_price) }} ₪.{% endif %}</p>
 <ul class="perks"><li><svg class="i"><use href="#i-check"/></svg> פרסום משרות ללא הגבלה</li><li><svg class="i"><use href="#i-check"/></svg> קבלת מועמדים וניהול שלהם במקום אחד</li><li><svg class="i"><use href="#i-check"/></svg> בדיקת כל משרה לפי חוק עבודת הנוער</li><li><svg class="i"><use href="#i-shield"/></svg> תג "עסק מאומת" אחרי אישור הצוות</li></ul></div>
+{% if preview %}<div class="paybar" style="grid-column:1/-1;margin:0"><div><b>תצוגה מקדימה למנהל.</b> ככה עסק חדש רואה את דף התשלום. {% if client_id %}התשלומים פעילים ({{ 'כסף אמיתי' if PAYPAL_LIVE else 'מצב בדיקה' }}).{% else %}<b>התשלומים עדיין כבויים:</b> חסרים PAYPAL_CLIENT_ID ו-PAYPAL_SECRET ב-Render, ולכן עסקים לא מתבקשים לשלם.{% endif %}</div><a class="btn white" href="/admin#pays">חזרה לניהול</a></div>{% endif %}
 <div class="card payc"><h2 style="margin-top:0">תשלום מאובטח</h2>
 {% if pend %}<div class="flash" style="width:auto;margin:0 0 14px">יש לך תשלום שממתין לאישור של PayPal. אין צורך לשלם שוב – נעדכן אותך במייל.</div>{% endif %}
-{% if not client_id %}<p class="mut">התשלום לא זמין כרגע. נסו שוב מאוחר יותר.</p>{% else %}
+{% if preview %}<div class="ppfake"><span class="ppy">PayPal</span><span class="ppc">כרטיס אשראי / Debit or Credit Card</span><small class="mut">כאן יופיעו הכפתורים של PayPal. בתצוגה מקדימה הם לא פעילים.</small></div>
+{% elif not client_id %}<p class="mut">התשלום לא זמין כרגע. נסו שוב מאוחר יותר.</p>{% else %}
 <p class="mut sm">אפשר לשלם עם חשבון PayPal, או בכרטיס אשראי (מאסטרקארד, ויזה ועוד) בלי לפתוח חשבון. פרטי הכרטיס מוזנים ישירות אצל PayPal ולא נשמרים אצלנו.</p>
 <label class="agree"><input type="checkbox" id="agree"> קראתי ואני מסכים/ה ל<a href="/terms#pay" target="_blank"><u>תנאי השימוש ומדיניות הביטול</u></a></label>
 <div id="ppb"></div><p id="pmsg" class="pmsg" role="status" aria-live="polite"></p>
@@ -1689,7 +1823,7 @@ T["base"] = """<!doctype html><html lang="{{ 'en' if lang=='en' else 'he' }}" di
 {% for m in get_flashed_messages() %}<div class="flash">{{m|tr}}</div>{% endfor %}
 <main id="mn">{% block c %}{% endblock %}</main>
 <footer><nav><a href="/jobs">חיפוש עבודה</a><a href="/employers">למעסיקים</a><a href="/faq">שאלות נפוצות</a><a href="/terms">תנאי שימוש</a><a href="/privacy">מדיניות פרטיות</a><a href="/support">תמיכה ויצירת קשר</a></nav>
-{{BRAND}} © · גרסה 5.0 · אנו פועלים לפי חוק עבודת הנוער, התשי"ג-1953 · נתקלתם במשרה חשודה? דווחו עליה בדף המשרה.</footer>
+{{BRAND}} © · גרסה 5.1 · אנו פועלים לפי חוק עבודת הנוער, התשי"ג-1953 · נתקלתם במשרה חשודה? דווחו עליה בדף המשרה.</footer>
 <nav class="tabbar"><a href="/"><svg class="i"><use href="#i-home"/></svg>בית</a><a href="/jobs"><svg class="i"><use href="#i-search"/></svg>חיפוש</a><a href="{{ '/me' if me else '/login' }}"><svg class="i"><use href="#i-heart"/></svg>שמורות</a><a href="{{ '/me' if me else '/login' }}"><svg class="i"><use href="#i-user"/></svg>החשבון</a></nav>
 <script>const $=s=>document.querySelector(s);
 requestAnimationFrame(()=>{const l=$('#ld');if(l){l.classList.add('x');setTimeout(()=>l.remove(),500)}});setTimeout(()=>$('#ld')&&$('#ld').classList.add('x'),2500);
@@ -1746,7 +1880,7 @@ T["job"] = """{% extends 'base' %}{% block c %}
 <textarea name="details" placeholder="פרטים נוספים (לא חובה)" oninput="this.form.reason.dataset.x=1"></textarea><button class="btn sm danger" style="justify-self:start">שליחת דיווח</button><small class="mut">הדיווח נשלח ישר לצוות האתר. משרה של עסק לא מאומת יורדת מהאתר מיד עד שנבדוק אותה.</small></form>
 {% else %}<p class="mut"><a href="/login?next=/job/{{j.id}}"><u>התחברו</u></a> כדי לדווח. כך אנחנו מונעים דיווחי סרק.</p>{% endif %}</details></div>
 <aside class="card side"><div class="wage" style="font-size:2rem">{{ '%g'|format(j.wage) }} <small>₪ {{ {'month':'לחודש','job':'לעבודה'}.get(j.wage_period,'לשעה') }}</small></div>
-{% if j.phone %}{% if me %}<p>טלפון ליצירת קשר: <a href="tel:{{j.phone}}" dir="ltr"><b>{{j.phone}}</b></a></p>{% else %}<p class="mut sm">התחברו כדי לראות את הטלפון של המעסיק.</p>{% endif %}{% endif %}
+{% if j.phone %}{% if me %}<p>טלפון ליצירת קשר: <a href="tel:{{j.phone|tel}}" dir="ltr"><b>{{j.phone|phone}}</b></a></p>{% else %}<p class="mut sm">התחברו כדי לראות את הטלפון של המעסיק.</p>{% endif %}{% endif %}
 {% if j.address %}{% if me %}<p><svg class="i"><use href="#i-pin"/></svg> כתובת: <b>{{j.address}}</b></p>{% else %}<p class="mut sm">התחברו כדי לראות את הכתובת.</p>{% endif %}{% endif %}
 {% if ap %}<p><span class="tag g">הגשת מועמדות · סטטוס: {{ap.status|tr}}</span></p>
 {% elif mode=='teen' %}<form class="f" method="post" action="/apply/{{j.id}}"><textarea name="message" placeholder="הודעה קצרה למעסיק (לא לכתוב טלפון/כתובת)"></textarea><button class="btn lg">שליחת מועמדות</button></form>
@@ -1789,7 +1923,7 @@ T["home"] = """{% extends 'base' %}{% block c %}
 <p class="lead">מחפשים עבודה שמתאימה לחיים שלכם? התחילו להרוויח כסף, לצבור ניסיון ולעשות את הצעד הראשון שלכם לעצמאות.</p>
 <div class="cta"><a class="btn lg neon" href="{{ '/switch/teen' if me else '/jobs' }}"><svg class="i"><use href="#i-search"/></svg> אני מחפש עבודה</a><a class="btn lg white" href="{{ '/switch/employer' if me else '/employers' }}"><svg class="i"><use href="#i-briefcase"/></svg> אני מעסיק עובדים</a></div>
 <ul class="checks"><li><svg class="i"><use href="#i-shield"/></svg> כל משרה נבדקת לפני פרסום</li><li><svg class="i"><use href="#i-check"/></svg> לפי חוק עבודת הנוער</li><li><svg class="i"><use href="#i-lock"/></svg> בלי לחשוף טלפון וכתובת</li></ul></div>
-<nav class="bento rv in" aria-label="קטגוריות">{% for t, c, ic in BENTO %}
+<nav class="bento rv in" aria-label="קטגוריות"><span class="seal" aria-hidden="true"><span><b>14–21</b>גילאי<br>נוער</span></span>{% for t, c, ic in BENTO %}
 <a class="bx {{c}}" href="{{ TYPE_URL[t] }}">{% if c=='b1' %}<span class="deco"></span>{% endif %}<span class="bi"><svg class="i"><use href="#i-{{ic}}"/></svg></span><span class="arr"><svg class="i"><use href="#i-chev"/></svg></span>
 <span><b>{{ t|tr }}</b><br><small>{% if cats.get(t) %}{{cats[t]}} משרות פתוחות{% else %}משרות חדשות בקרוב{% endif %}</small></span></a>{% endfor %}</nav></section>
 <div class="tape" aria-hidden="true"><div class="tk">{% for k in range(2) %}{% for t in TYPES %}{% if t!='אחר' %}<span>{{t|tr}}</span>{% endif %}{% endfor %}{% endfor %}</div></div>
@@ -1805,7 +1939,7 @@ T["home"] = """{% extends 'base' %}{% block c %}
 <div class="card step"><b class="n">1</b><span class="fi"><svg class="i"><use href="#i-user"/></svg></span><h3>נרשמים</h3><p class="mut">יוצרים פרופיל אישי בכמה דקות.</p></div>
 <div class="card step"><b class="n">2</b><span class="fi"><svg class="i"><use href="#i-search"/></svg></span><h3>מוצאים עבודה</h3><p class="mut">מחפשים משרות שמתאימות לגיל, לאזור ולזמינות.</p></div>
 <div class="card step"><b class="n">3</b><span class="fi"><svg class="i"><use href="#i-send"/></svg></span><h3>מגישים מועמדות</h3><p class="mut">יוצרים קשר בצורה בטוחה ומתחילים את הדרך לעבודה הראשונה.</p></div></div>
-<h2 class="rv">עבודות לפי עיר</h2><div class="chips rv">{% for c in CITIES %}{% if CITY_URL.get(c) %}<a href="{{ CITY_URL[c] }}">{{ c|tr }}</a>{% endif %}{% endfor %}</div>
+<h2 class="rv">עבודות לפי עיר</h2><div class="chips rv">{% for c in CITY_TOP %}{% if CITY_URL.get(c) %}<a href="{{ CITY_URL[c] }}">{{ c|tr }}</a>{% endif %}{% endfor %}</div>
 <div class="band rv"><div><h2>מחפשים עובדים צעירים ואחראיים?</h2><p>מפרסמים משרה ומגיעים לבני נוער בכל הארץ.</p></div><a class="btn lg" href="/employers">למעסיקים</a></div>{% endblock %}"""
 
 T["err"] = """{% extends 'base' %}{% block c %}<div class="card narrow empty"><h1 class="grad">{{code}}</h1><p>{{msg|tr}}</p><a class="btn" href="/">חזרה לדף הבית</a></div>{% endblock %}"""
@@ -2324,6 +2458,34 @@ TeenJobs – עבודות לבני נוער בישראל. מעסיקים מאו�
 """.strip().splitlines())
 
 EN.update(dict(l.split(" => ") for l in """
+יש לבחור עיר מהרשימה. אם העיר לא ברשימה, בחרו "יישוב אחר" באזור שלכם. => Choose a city from the list. If yours is not listed, choose "Other town" in your region.
+השכר חייב להיות מספר חיובי. => Pay must be a positive number.
+השכר שהוזן גבוה בצורה לא סבירה. בדקו שלא נוספו ספרות בטעות. => The pay entered is unreasonably high. Check for extra digits.
+מספר הטלפון אינו מספר ישראלי תקין. כתבו נייד כמו 50-123-4567 (אחרי ה-972+). => The phone is not a valid Israeli number. Enter a mobile like 50-123-4567 (after +972).
+הדרישות אינן ברורות. כתבו במילים פשוטות, או השאירו ריק. => The requirements are unclear. Use simple words, or leave empty.
+הכתובת אינה ברורה. כתבו רחוב ומספר, למשל: הרצל 12. => The address is unclear. Write a street and number, e.g. Herzl 12.
+מספר ישראלי בלבד: נייד ( => Israeli numbers only: mobile (
+) או קווי ( => ) or landline (
+), בלי ה-0 בהתחלה. => ), without the leading 0.
+המספר לא נראה כמו מספר ישראלי אמיתי. דוגמה לנייד: 50-123-4567 => That does not look like a real Israeli number. Mobile example: 50-123-4567
+מספר לא תקין => Invalid number
+אותיות בלבד, 2–40 תווים => Letters only, 2–40 characters
+גילאי<br>נוער => teen<br>ages
+תצוגה מקדימה למנהל. => Admin preview.
+ככה עסק חדש רואה את דף התשלום. => This is what a new business sees on the payment page.
+התשלומים פעילים => Payments are on
+כסף אמיתי => real money
+מצב בדיקה => test mode
+התשלומים עדיין כבויים: => Payments are still off:
+חסרים PAYPAL_CLIENT_ID ו-PAYPAL_SECRET ב-Render, ולכן עסקים לא מתבקשים לשלם. => PAYPAL_CLIENT_ID and PAYPAL_SECRET are missing in Render, so businesses are not asked to pay.
+חזרה לניהול => Back to admin
+כאן יופיעו הכפתורים של PayPal. בתצוגה מקדימה הם לא פעילים. => The PayPal buttons appear here. They are inactive in preview.
+כרטיס אשראי / Debit or Credit Card => Debit or Credit Card
+התשלום על פרסום עסק עדיין כבוי. => Paid business listings are still off.
+חסרים ב-Render המפתחות PAYPAL_CLIENT_ID ו-PAYPAL_SECRET. עד שתוסיף אותם, עסקים מפרסמים בחינם. (אתה כמנהל פטור מתשלום בכל מקרה, אז גם אז לא תראה את דף התשלום מהחשבון שלך.) => The PAYPAL_CLIENT_ID and PAYPAL_SECRET keys are missing in Render. Until you add them, businesses post for free. (As admin you are always exempt, so you will not see the payment page from your own account.)
+איך נראה דף התשלום => See the payment page
+תצוגה מקדימה של דף התשלום => Payment page preview
+העסק לדוגמה => Sample business
 מחיר השקה => Launch price
 הנחה => off
 פרסום העסק שלך ב- => List your business on 
@@ -2545,6 +2707,91 @@ EN.update(dict(l.split(" => ") for l in """
 גרסה => Version
 """.strip().splitlines()))
 EX.update(dict(l.split(" => ") for l in """
+חולון => Holon
+בת ים => Bat Yam
+אשקלון => Ashkelon
+רחובות => Rehovot
+בית שמש => Beit Shemesh
+חדרה => Hadera
+נצרת => Nazareth
+לוד => Lod
+רמלה => Ramla
+רהט => Rahat
+ראש העין => Rosh HaAyin
+הוד השרון => Hod HaSharon
+גבעתיים => Givatayim
+קריית אתא => Kiryat Ata
+נהריה => Nahariya
+קריית גת => Kiryat Gat
+אום אל-פחם => Umm al-Fahm
+אילת => Eilat
+עפולה => Afula
+נס ציונה => Ness Ziona
+עכו => Akko
+יבנה => Yavne
+אלעד => Elad
+רמת השרון => Ramat HaSharon
+כרמיאל => Karmiel
+טבריה => Tiberias
+קריית מוצקין => Kiryat Motzkin
+קריית ביאליק => Kiryat Bialik
+קריית ים => Kiryat Yam
+נתיבות => Netivot
+אופקים => Ofakim
+שדרות => Sderot
+דימונה => Dimona
+ערד => Arad
+קריית שמונה => Kiryat Shmona
+צפת => Safed
+יקנעם => Yokneam
+מגדל העמק => Migdal HaEmek
+נוף הגליל => Nof HaGalil
+טירת כרמל => Tirat Carmel
+נשר => Nesher
+יהוד-מונוסון => Yehud-Monosson
+קריית אונו => Kiryat Ono
+גבעת שמואל => Givat Shmuel
+אור עקיבא => Or Akiva
+זכרון יעקב => Zichron Yaakov
+פרדס חנה-כרכור => Pardes Hanna-Karkur
+קיסריה => Caesarea
+באר יעקב => Beer Yaakov
+גדרה => Gedera
+קריית מלאכי => Kiryat Malachi
+שוהם => Shoham
+מעלה אדומים => Maale Adumim
+ביתר עילית => Beitar Illit
+מודיעין עילית => Modiin Illit
+אריאל => Ariel
+טייבה => Tayibe
+טירה => Tira
+סח'נין => Sakhnin
+שפרעם => Shefa-Amr
+באקה אל-גרבייה => Baqa al-Gharbiyye
+קלנסווה => Qalansawe
+טמרה => Tamra
+כפר קאסם => Kafr Qasim
+כפר יונה => Kfar Yona
+קדימה-צורן => Kadima-Zoran
+אבן יהודה => Even Yehuda
+תל מונד => Tel Mond
+גני תקווה => Ganei Tikva
+להבים => Lehavim
+עומר => Omer
+מיתר => Meitar
+ירוחם => Yeruham
+מצפה רמון => Mitzpe Ramon
+בית שאן => Beit Shean
+מעלות-תרשיחא => Maalot-Tarshiha
+שלומי => Shlomi
+קצרין => Katzrin
+יישוב אחר בצפון => Other town – North
+יישוב אחר במרכז => Other town – Center
+יישוב אחר באזור ירושלים => Other town – Jerusalem area
+יישוב אחר בדרום => Other town – South
+השם אינו תקין. כתבו שם או כינוי אמיתי באותיות (2–40 תווים). => That name is not valid. Use a real name or nickname in letters (2–40 characters).
+ההודעה למעסיק אינה ברורה. כתבו כמה מילים, או השאירו ריק. => The message to the employer is unclear. Write a few words, or leave it empty.
+התגובה אינה ברורה. כתבו כמה מילים, או השאירו ריק. => The comment is unclear. Write a few words, or leave it empty.
 התשלום לא מוגדר כרגע. => Payment is not set up right now.
 קודם יוצרים פרופיל עסקי. => First, create a business profile.
 כבר שילמת. אין צורך לשלם שוב. => You already paid. No need to pay again.
