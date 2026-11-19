@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS apps(id INTEGER PRIMARY KEY, user_id INTEGER, job_id 
 CREATE TABLE IF NOT EXISTS ratings(user_id INTEGER, job_id INTEGER, stars INTEGER, comment TEXT,
   created TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(user_id, job_id));
 CREATE TABLE IF NOT EXISTS otps(uid INTEGER PRIMARY KEY, h TEXT, exp REAL, tries INTEGER DEFAULT 0, sent REAL);
+CREATE TABLE IF NOT EXISTS free_passes(email TEXT PRIMARY KEY, note TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS payments(id INTEGER PRIMARY KEY, user_id INTEGER, order_id TEXT UNIQUE, capture_id TEXT, amount TEXT, currency TEXT,
   status TEXT, payer TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS reports(id INTEGER PRIMARY KEY, job_id INTEGER, user_id INTEGER, reason TEXT,
@@ -446,6 +447,7 @@ def logo():
 
 @app.before_request
 def _csrf():                       # הגנת CSRF לכל טופס POST
+    if not _SITE["url"]: _SITE["url"] = request.host_url.rstrip("/")      # לזכור את כתובת האתר בשביל המיילים
     if "t" not in session: session["t"] = secrets.token_hex(16)
     if request.method == "POST" and not secrets.compare_digest(request.form.get("_t", "").encode(), session["t"].encode()):
         flash("הדף פג תוקף – נסו שוב.")
@@ -755,6 +757,49 @@ def failed(k):
 def site():
     return (PUBLIC_URL or request.host_url).rstrip("/")
 
+_SITE = {"url": PUBLIC_URL.rstrip("/")}      # כתובת האתר, גם למיילים שנשלחים ברקע (בלי בקשה פעילה)
+
+def mail_html(subject, text):
+    """הופך מייל טקסט פשוט למייל מעוצב: לוגו, צבעי האתר, כפתורים לקישורים וקוד אימות גדול.
+    בנוי מטבלאות וסגנון מוטמע, כדי שייראה טוב גם ב-Gmail, Outlook ובטלפון."""
+    base = _SITE["url"] or ""
+    rtl = not re.fullmatch(r"[\x00-\x7F₪–\s]*", text or "")
+    al, dr = ("right", "rtl") if rtl else ("left", "ltr")
+    rows = []
+    for para in re.split(r"\n\s*\n", (text or "").strip()):
+        for ln in para.split("\n"):
+            ln = ln.strip()
+            if not ln: continue
+            m = re.match(r"(.*?)\s*:?\s*(https?://\S+)\s*$", ln)
+            if m:      # שורה שמסתיימת בקישור → כפתור
+                label = (m.group(1).strip(" :") or ("לכניסה" if rtl else "Open"))
+                rows.append(f'<tr><td align="center" style="padding:14px 0 6px"><a href="{escape(m.group(2))}" style="display:inline-block;background:#FF5C7A;color:#1A1530;'
+                            f'text-decoration:none;font-weight:800;font-size:16px;padding:13px 26px;border-radius:12px;border:2px solid #1A1530">{escape(label)}</a></td></tr>')
+                continue
+            code = re.search(r"(?<!\d)(\d{6})(?!\d)", ln) if re.search("קוד|code", ln, re.I) else None
+            if code:   # קוד אימות → תיבה גדולה
+                rows.append(f'<tr><td style="padding:6px 0;font-size:16px;color:#1A1530">{escape(ln[:code.start()].strip(" :"))}</td></tr>'
+                            f'<tr><td align="center" style="padding:10px 0 14px"><div style="display:inline-block;background:#FFC93C;border:2px solid #1A1530;border-radius:14px;'
+                            f'padding:12px 26px;font-size:34px;font-weight:900;letter-spacing:10px;color:#1A1530;direction:ltr">{code.group(1)}</div></td></tr>')
+                continue
+            k = re.match(r"([^:]{1,22}):\s+(.+)", ln)
+            body = (f'<b style="color:#1A1530">{escape(k.group(1))}:</b> {escape(k.group(2))}' if k else escape(ln))
+            rows.append(f'<tr><td style="padding:4px 0;font-size:16px;line-height:1.6;color:#2b2540">{body}</td></tr>')
+        rows.append('<tr><td style="height:10px;line-height:10px">&nbsp;</td></tr>')
+    logo = (f'<img src="{base}/logo.png" width="52" height="52" alt="" style="display:block;border-radius:14px;border:2px solid #1A1530;background:#fff">' if base else "")
+    foot = ("קיבלת את המייל הזה כי נרשמת ל-" + BRAND + ". אנחנו פועלים לפי חוק עבודת הנוער.") if rtl else (f"You got this email because you signed up for {BRAND}.")
+    return f"""<!doctype html><html dir="{dr}" lang="{'he' if rtl else 'en'}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{escape(subject)}</title></head>
+<body style="margin:0;padding:0;background:#FFF7EE"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#FFF7EE"><tr><td align="center" style="padding:28px 12px">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;font-family:Arial,Helvetica,sans-serif;direction:{dr};text-align:{al}">
+<tr><td style="background:#FF5C7A;border:2px solid #1A1530;border-bottom:0;border-radius:18px 18px 0 0;padding:18px 22px">
+<table role="presentation" cellpadding="0" cellspacing="0" style="direction:{dr}"><tr><td>{logo}</td><td style="padding:0 12px;font-size:24px;font-weight:900;color:#1A1530">{escape(BRAND)}</td></tr></table></td></tr>
+<tr><td style="background:#FFC93C;border-inline:2px solid #1A1530;border-left:2px solid #1A1530;border-right:2px solid #1A1530;height:8px;line-height:8px;font-size:0">&nbsp;</td></tr>
+<tr><td style="background:#ffffff;border:2px solid #1A1530;border-top:0;border-radius:0 0 18px 18px;padding:26px 24px 18px">
+<div style="font-size:21px;font-weight:900;color:#1A1530;margin:0 0 14px">{escape(subject.replace(BRAND + " – ", "").replace(BRAND + " - ", ""))}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{"".join(rows)}</table></td></tr>
+<tr><td style="padding:16px 8px;font-size:12px;color:#7a7290;text-align:center">{escape(foot)}{f'<br><a href="{base}" style="color:#7a7290">{base.replace("https://", "")}</a>' if base else ''}</td></tr>
+</table></td></tr></table></body></html>"""
+
 def send_mail(to, subject, text):
     """שולח אימייל דרך Brevo (אם הוגדר BREVO_API_KEY) או Resend. מחזיר True אם נשלח."""
     if DEV_MODE:
@@ -763,10 +808,10 @@ def send_mail(to, subject, text):
         m = re.fullmatch(r"\s*(.*?)\s*<([^<>]+)>\s*", EMAIL_FROM)
         sender = {"name": m.group(1) or BRAND, "email": m.group(2).strip()} if m else {"name": BRAND, "email": EMAIL_FROM.strip()}
         url, hdr = "https://api.brevo.com/v3/smtp/email", {"api-key": BREVO_API_KEY}
-        payload = {"sender": sender, "to": [{"email": to}], "subject": subject, "textContent": text}
+        payload = {"sender": sender, "to": [{"email": to}], "subject": subject, "textContent": text, "htmlContent": mail_html(subject, text)}
     else:
         url, hdr = "https://api.resend.com/emails", {"Authorization": "Bearer " + RESEND_API_KEY}
-        payload = {"from": EMAIL_FROM, "to": [to], "subject": subject, "text": text}
+        payload = {"from": EMAIL_FROM, "to": [to], "subject": subject, "text": text, "html": mail_html(subject, text)}
     hdr.update({"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "teenjobs/1.0"})
     try:
         urllib.request.urlopen(urllib.request.Request(url, json.dumps(payload).encode(), hdr), timeout=15); return True
@@ -1225,8 +1270,11 @@ def employer():
             flash("מספר העוסק/ח\"פ אינו תקין. כתבו את המספר האמיתי, או את המילה \"פרטי\" אם אתם אדם פרטי."); return redirect("/employer")
         if emp: ex("UPDATE employers SET verified=CASE WHEN business=? AND COALESCE(reg_no,'')=? THEN verified ELSE 0 END, business=?,city=?,about=?,reg_no=? WHERE user_id=?",
                    (f["business"], f["reg_no"], f["business"], pick(f, "city", CITIES), f["about"], f["reg_no"], uid))
-        else: ex("INSERT INTO employers(user_id,business,city,about,reg_no,paid) VALUES(?,?,?,?,?,0)",     # עסק חדש מתחיל כלא משולם (עסקים ותיקים נשארו פטורים)
-                 (uid, f["business"], pick(f, "city", CITIES), f["about"], f["reg_no"]))
+        else:      # עסק חדש מתחיל כלא משולם, אלא אם המנהל נתן לאימייל הזה כניסה חינם
+            em = q("SELECT email FROM users WHERE id=?", (uid,), True)["email"]
+            free = int(bool(q("SELECT 1 FROM free_passes WHERE email=?", ((em or "").lower(),), True)))
+            ex("INSERT INTO employers(user_id,business,city,about,reg_no,paid) VALUES(?,?,?,?,?,?)",
+               (uid, f["business"], pick(f, "city", CITIES), f["about"], f["reg_no"], free))
         verify_async(uid)
         flash("פרופיל העסק נשמר  – הבקשה לאימות הועברה לצוות."); return redirect("/employer")
     js = q("""SELECT j.*, (SELECT COUNT(*) FROM apps WHERE job_id=j.id) napps,
@@ -1246,6 +1294,8 @@ def job_form(jid):
         flash("קודם יוצרים פרופיל עסקי."); return redirect("/employer")
     if not biz_paid(uid):
         flash("כדי לפרסם משרות צריך קודם להשלים את התשלום על פרסום העסק."); return redirect("/employer/pay")
+    if PAY_ON and is_admin() and request.method == "GET" and not jid:
+        flash("שים לב: אתה מחובר כמנהל, ולכן לא התבקשת לשלם. כדי לראות את התשלום כמו לקוח, התחבר עם חשבון שאינו מנהל.")
     j = q("SELECT * FROM jobs WHERE id=? AND employer_id=?", (jid, uid), True) if jid else None
     if jid and not j: abort(404)
     if request.method == "POST":
@@ -1305,6 +1355,15 @@ def notify_decision(jid, ok):
 def admin_action(f):
     """כל הפעולות של המנהל, מכל דפי הניהול. מחזיר True אם בוצעה פעולה."""
     act = f.get("act", ""); n = int(f.get("id", "0")) if f.get("id", "").isdigit() else 0
+    if act == "free_add":      # כניסה חינם לפי אימייל – גם לעסק שעוד לא נרשם
+        em = f.get("email", "").strip().lower()
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", em): flash("כתובת האימייל אינה תקינה."); return True
+        if not q("SELECT 1 FROM free_passes WHERE email=?", (em,), True):
+            ex("INSERT INTO free_passes(email,note) VALUES(?,?)", (em, f.get("note", "").strip()[:80]))
+        ex("UPDATE employers SET paid=1 WHERE user_id=(SELECT id FROM users WHERE email=?)", (em,))
+        flash(f"{em} קיבל כניסה חינם. אם העסק כבר רשום, הוא יכול לפרסם מעכשיו; אם לא, זה יחול כשיירשם."); return True
+    if act == "free_del":
+        ex("DELETE FROM free_passes WHERE email=?", (f.get("email", "").strip().lower(),)); flash("הכניסה החינמית בוטלה (עסק שכבר נרשם נשאר פטור; אפשר לסמן אותו כלא שילם)."); return True
     if not n: return False
     if act == "approve":                   # אישור משרה (ומנקה דיווחים ישנים כדי שלא תרד שוב מיד)
         ex("UPDATE jobs SET approved=1, active=1 WHERE id=?", (n,)); ex("DELETE FROM reports WHERE job_id=?", (n,)); notify_decision(n, True)
@@ -1361,7 +1420,10 @@ def admin():
                            pend=q("SELECT j.id,j.title,j.city,j.description,j.min_age,j.ai_verdict,j.ai_note,e.business,e.verified FROM jobs j JOIN employers e ON e.user_id=j.employer_id WHERE j.approved=0 ORDER BY j.id DESC"),
                            reps=q("""SELECT j.id job_id, j.title, j.approved, COUNT(*) n, MAX(r.reason) reason FROM reports r JOIN jobs j ON j.id=r.job_id
                                      GROUP BY j.id, j.title, j.approved ORDER BY COUNT(*) DESC"""),
-                           banned=q("SELECT id, email FROM users WHERE banned=1"), pay_on=PAY_ON, pay_live=PAYPAL_LIVE, price=price_now(),
+                           banned=q("SELECT id, email FROM users WHERE banned=1"), pay_on=PAY_ON, passes=q("SELECT * FROM free_passes ORDER BY created DESC"),
+                           diag=dict(pp_id=bool(PAYPAL_CLIENT_ID), pp_sec=bool(PAYPAL_SECRET), live=PAYPAL_LIVE, ai=AI_ON, mail=not DEV_MODE,
+                                     mail_kind="Brevo" if BREVO_API_KEY else "Resend" if RESEND_API_KEY else "", admins=sorted(ADMINS),
+                                     me_admin=((q("SELECT email FROM users WHERE id=?", (session.get("uid"),), True) or {"email": ""})["email"])), pay_live=PAYPAL_LIVE, price=price_now(),
                            pays=q("""SELECT p.*, e.business, u.email FROM payments p LEFT JOIN employers e ON e.user_id=p.user_id
                                      LEFT JOIN users u ON u.id=p.user_id WHERE p.status<>'CREATED' ORDER BY p.id DESC LIMIT 100"""),
                            income=sum(Decimal(r["amount"]) for r in q("SELECT amount FROM payments WHERE status='COMPLETED'")))
@@ -1535,6 +1597,7 @@ details.edit>summary h2::after{content:"✎";font-size:1rem;width:36px;height:36
 .pr-big{display:flex;align-items:baseline;gap:14px;margin:6px 0 10px}.pr-big b{font-size:clamp(3rem,8vw,4.6rem);font-weight:900;line-height:1}.was{font-size:1.5rem;font-weight:800;opacity:.6;text-decoration-thickness:3px}
 .perks{list-style:none;padding:0;margin:16px 0 0;display:grid;gap:8px}.perks li{display:flex;gap:8px;align-items:center;font-weight:700;background:#fff;border:2px solid #10152B;border-radius:10px;padding:8px 12px}
 .ppfake{display:grid;gap:10px;margin:16px 0}.ppfake span{display:grid;place-items:center;height:48px;border-radius:6px;font-weight:800}.ppy{background:#ffc439;color:#003087;font-style:italic;font-size:1.2rem}.ppc{background:#2c2e2f;color:#fff}
+.sys{display:grid;gap:10px}.sys .tag{min-width:26px;justify-content:center}
 .agree{display:flex;gap:10px;align-items:center;font-weight:700;margin:16px 0;cursor:pointer}.agree input{width:20px;height:20px}#ppb{min-height:120px}
 .pmsg{margin:10px 0 0;font-weight:800}.pmsg.on{background:#ffe9a8;color:#5c4100;border:2px solid #10152B;border-radius:10px;padding:10px 12px}
 .paybar{display:flex;gap:16px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-top:20px;padding:18px 22px;background:#ffe9a8;color:#10152B;border:var(--bw) solid var(--line);border-radius:18px;box-shadow:var(--sh)}.paybar s{opacity:.6}
@@ -1715,10 +1778,21 @@ T["admin"] = """{% extends 'base' %}{% block c %}{% if not ok %}<div class="card
 <form method="post" class="acts"><input type="hidden" name="id" value="{{j.id}}"><a class="btn sm ghost" href="/job/{{j.id}}">צפייה</a><button class="btn sm ghost" name="act" value="hide">הורדה מהאתר</button><button class="btn sm danger" name="act" value="delete_job" onclick="return confirm('למחוק את המשרה לגמרי?')">מחיקה</button></form></div>
 {% else %}<div class="card empty">לא נמצאו משרות</div>{% endfor %}
 
-<h2 id="emps">עסקים</h2>{% for e in emps %}<div class="card adm-row"><div class="grow"><b>{{e.business}}</b> · {{e.city|tr}} · <span dir="ltr" class="mut">{{e.email}}</span> · ח"פ: {{e.reg_no or '—'}} <span class="tag {{ 'g' if e.verified else 'o' }}">{{'מאומת' if e.verified else 'לא מאומת'}}</span>{% if pay_on %}<span class="tag {{ 'g' if e.paid else 'p' }}">{{'שולם' if e.paid else 'לא שילם'}}</span>{% endif %}{% if e.ai_ok %}<span class="tag">Claude ממליץ לאשר</span>{% endif %}{% if e.ai_note %}<br><small class="mut">{{e.ai_note}}</small>{% endif %}</div>
-<form method="post" class="acts"><input type="hidden" name="id" value="{{e.user_id}}">{% if e.verified %}<button class="btn sm ghost" name="act" value="unverify">ביטול אימות</button>{% else %}<button class="btn sm" name="act" value="verify">אימות</button>{% endif %}<button class="btn sm ghost" name="act" value="recheck_emp">בדיקת Claude</button>{% if pay_on %}{% if e.paid %}<button class="btn sm ghost" name="act" value="mark_unpaid">סימון כלא שילם</button>{% else %}<button class="btn sm ghost" name="act" value="mark_paid">פטור מתשלום</button>{% endif %}{% endif %}
+<h2 id="emps">עסקים</h2>{% for e in emps %}<div class="card adm-row"><div class="grow"><b>{{e.business}}</b> · {{e.city|tr}} · <span dir="ltr" class="mut">{{e.email}}</span> · ח"פ: {{e.reg_no or '—'}} <span class="tag {{ 'g' if e.verified else 'o' }}">{{'מאומת' if e.verified else 'לא מאומת'}}</span><span class="tag {{ 'g' if e.paid else 'p' }}">{{'שולם / פטור' if e.paid else 'לא שילם'}}</span>{% if e.ai_ok %}<span class="tag">Claude ממליץ לאשר</span>{% endif %}{% if e.ai_note %}<br><small class="mut">{{e.ai_note}}</small>{% endif %}</div>
+<form method="post" class="acts"><input type="hidden" name="id" value="{{e.user_id}}">{% if e.verified %}<button class="btn sm ghost" name="act" value="unverify">ביטול אימות</button>{% else %}<button class="btn sm" name="act" value="verify">אימות</button>{% endif %}<button class="btn sm ghost" name="act" value="recheck_emp">בדיקת Claude</button>{% if e.paid %}<button class="btn sm ghost" name="act" value="mark_unpaid">סימון כלא שילם</button>{% else %}<button class="btn sm" name="act" value="mark_paid">כניסה חינם</button>{% endif %}
 <button class="btn sm danger" name="act" value="delete_emp" onclick="return confirm('למחוק את העסק ואת כל המשרות שלו?')">מחיקת העסק</button><button class="btn sm danger" name="act" value="ban" onclick="return confirm('לחסום את המשתמש ולמחוק את כל המשרות שלו?')">חסימה</button></form></div>
 {% else %}<div class="card empty">אין עסקים</div>{% endfor %}
+<h2 id="sys">מצב המערכת</h2><div class="card sys">
+<div><span class="tag {{ 'g' if diag.pp_id and diag.pp_sec else 'p' }}">{{ '✔' if diag.pp_id and diag.pp_sec else '✖' }}</span> <b>PayPal:</b>
+{% if diag.pp_id and diag.pp_sec %}מחובר · {{ 'כסף אמיתי (live)' if diag.live else 'מצב בדיקה (sandbox)' }}{% else %}לא מחובר – {% if not diag.pp_id %}חסר PAYPAL_CLIENT_ID{% endif %}{% if not diag.pp_id and not diag.pp_sec %} ו-{% endif %}{% if not diag.pp_sec %}חסר PAYPAL_SECRET{% endif %} ב-Render (השם צריך להיות בדיוק כך, באותיות גדולות){% endif %}</div>
+<div><span class="tag {{ 'g' if diag.ai else 'o' }}">{{ '✔' if diag.ai else '–' }}</span> <b>Claude (בדיקת משרות אוטומטית):</b> {{ 'מחובר' if diag.ai else 'לא מחובר – לא חובה. בלעדיו כל משרה מחכה לאישור ידני שלך. להפעלה: ANTHROPIC_API_KEY ב-Render' }}</div>
+<div><span class="tag {{ 'g' if diag.mail else 'p' }}">{{ '✔' if diag.mail else '✖' }}</span> <b>שליחת מיילים:</b> {{ 'מחובר דרך ' ~ diag.mail_kind if diag.mail else 'לא מחובר' }}</div>
+<div><span class="tag o">!</span> <b>חשבונות מנהל (פטורים מתשלום):</b> <span dir="ltr">{{ diag.admins|join(', ') }}</span>. אתה מחובר עכשיו כ-<span dir="ltr">{{ diag.me_admin or 'קוד ניהול' }}</span>.</div></div>
+
+<h2 id="free">כניסה חינם לעסקים</h2><div class="card"><p class="mut" style="margin-top:0">עסק עם כניסה חינם לא מתבקש לשלם. אפשר לתת אותה גם לעסק שעוד לא נרשם: כשיירשם עם האימייל הזה, הוא יהיה פטור.</p>
+<form method="post" class="row" style="justify-content:flex-start"><input type="email" name="email" required placeholder="אימייל של בעל העסק" dir="ltr" style="max-width:300px"><input name="note" maxlength="80" placeholder="הערה (לא חובה), למשל: שותף ראשון" style="max-width:280px"><button class="btn" name="act" value="free_add">מתן כניסה חינם</button></form>
+{% for fp in passes %}<form method="post" class="row" style="margin-top:10px;padding-top:10px;border-top:2px dashed var(--soft)"><span><b dir="ltr">{{fp.email}}</b>{% if fp.note %} · <span class="mut">{{fp.note}}</span>{% endif %}</span><input type="hidden" name="email" value="{{fp.email}}"><button class="btn sm ghost" name="act" value="free_del">ביטול</button></form>{% endfor %}</div>
+
 <h2 id="pays">תשלומים</h2>
 {% if not pay_on %}<div class="card"><b>התשלומים כבויים.</b> <span class="mut">כדי להפעיל, מוסיפים ב-Render את PAYPAL_CLIENT_ID ו-PAYPAL_SECRET (הסבר ב-README). עד אז עסקים יכולים לפרסם בחינם.</span></div>
 {% else %}<div class="card row" style="margin-bottom:12px"><a class="btn sm white" href="/admin/pay-preview">תצוגה מקדימה של דף התשלום</a><span>מצב: <span class="tag {{ 'g' if pay_live else 'o' }}">{{ 'כסף אמיתי (live)' if pay_live else 'מצב בדיקה (sandbox)' }}</span> · מחיר נוכחי: <b>{{ '%.2f'|format(price) }} ₪</b></span><span>הכנסות: <b>{{ '%.2f'|format(income) }} ₪</b></span></div>{% endif %}
@@ -2458,6 +2532,25 @@ TeenJobs – עבודות לבני נוער בישראל. מעסיקים מאו�
 """.strip().splitlines())
 
 EN.update(dict(l.split(" => ") for l in """
+מצב המערכת => System status
+מחובר · => Connected ·
+לא מחובר – => Not connected –
+חסר PAYPAL_CLIENT_ID => PAYPAL_CLIENT_ID missing
+חסר PAYPAL_SECRET => PAYPAL_SECRET missing
+ב-Render (השם צריך להיות בדיוק כך, באותיות גדולות) => in Render (the name must be exactly this, in capitals)
+Claude (בדיקת משרות אוטומטית): => Claude (automatic job checks):
+לא מחובר – לא חובה. בלעדיו כל משרה מחכה לאישור ידני שלך. להפעלה: ANTHROPIC_API_KEY ב-Render => Not connected – optional. Without it every job waits for your manual approval. To enable: ANTHROPIC_API_KEY in Render
+שליחת מיילים: => Email sending:
+מחובר דרך => Connected via
+חשבונות מנהל (פטורים מתשלום): => Admin accounts (exempt from payment):
+אתה מחובר עכשיו כ- => You are logged in as 
+כניסה חינם לעסקים => Free entry for businesses
+עסק עם כניסה חינם לא מתבקש לשלם. אפשר לתת אותה גם לעסק שעוד לא נרשם: כשיירשם עם האימייל הזה, הוא יהיה פטור. => A business with free entry is not asked to pay. You can grant it before the business signs up: when it registers with this email, it is exempt.
+אימייל של בעל העסק => Business owner email
+הערה (לא חובה), למשל: שותף ראשון => Note (optional), e.g. first partner
+מתן כניסה חינם => Grant free entry
+כניסה חינם => Free entry
+שולם / פטור => Paid / exempt
 יש לבחור עיר מהרשימה. אם העיר לא ברשימה, בחרו "יישוב אחר" באזור שלכם. => Choose a city from the list. If yours is not listed, choose "Other town" in your region.
 השכר חייב להיות מספר חיובי. => Pay must be a positive number.
 השכר שהוזן גבוה בצורה לא סבירה. בדקו שלא נוספו ספרות בטעות. => The pay entered is unreasonably high. Check for extra digits.
@@ -2707,6 +2800,8 @@ EN.update(dict(l.split(" => ") for l in """
 גרסה => Version
 """.strip().splitlines()))
 EX.update(dict(l.split(" => ") for l in """
+שים לב: אתה מחובר כמנהל, ולכן לא התבקשת לשלם. כדי לראות את התשלום כמו לקוח, התחבר עם חשבון שאינו מנהל. => Note: you are logged in as admin, so you were not asked to pay. To see payment as a customer, log in with a non-admin account.
+הכניסה החינמית בוטלה (עסק שכבר נרשם נשאר פטור; אפשר לסמן אותו כלא שילם). => Free entry removed (a business that already registered stays exempt; you can mark it unpaid).
 חולון => Holon
 בת ים => Bat Yam
 אשקלון => Ashkelon
